@@ -9,7 +9,7 @@ import time
 import threading
 import os
 import requests 
-from curl_cffi import requests as curl_requests # Il nuovo scraper anti-blocco!
+from curl_cffi import requests 
 
 app = FastAPI(title="🃏 Price Bot API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -48,31 +48,13 @@ import urllib.parse
 
 def scrape_price(url):
     try:
-        # Prepariamo l'URL per darlo in pasto a Google
-        encoded_url = urllib.parse.quote(url)
+        # impersonate="chrome120" inganna Cloudflare/DataDome falsificando l'handshake TLS
+        response = requests.get(url, impersonate="chrome120", timeout=15)
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, come Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        
-        # TENTATIVO 1: Usiamo il proxy di Google Translate! 
-        # (Google scarica la pagina per noi sui suoi server e ce la restituisce, bypassando Cloudflare)
-        translate_url = f"https://translate.google.com/translate?hl=it&sl=it&tl=it&u={encoded_url}"
-        
-        # Usiamo il modulo 'requests' normale, tanto Google non ci blocca l'IP
-        response = requests.get(translate_url, headers=headers, timeout=15)
-        
-        # Se Google Translate fallisce, proviamo con la Google Cache (fotografia della pagina)
-        if response.status_code != 200:
-            cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{encoded_url}"
-            response = requests.get(cache_url, headers=headers, timeout=15)
-            
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Ricerca del prezzo (la struttura HTML rimane uguale anche se scaricata da Google)
         prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
         
-        # Metodo di riserva se il primo span non si trova
         if not prezzo_tag:
             tabelle = soup.select('dd.col-6.col-xl-7')
             for tag in tabelle:
@@ -81,13 +63,14 @@ def scrape_price(url):
                     break
 
         if prezzo_tag:
+            # Usa la tua funzione parse_prezzo (assicurati che esista nel file)
             return parse_prezzo(prezzo_tag.get_text(strip=True))
         
-        print("⚠️ Prezzo non trovato tramite i server di Google.")
+        print("⚠️ Prezzo non trovato nel DOM.")
         return None
         
     except Exception as e:
-        print(f"❌ Errore nello scraper Google: {e}")
+        print(f"❌ Errore con curl_cffi: {e}")
         return None
 
 @app.post("/watch")
