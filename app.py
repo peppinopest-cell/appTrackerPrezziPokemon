@@ -49,32 +49,26 @@ import urllib.parse
 
 def scrape_price(url):
     try:
-        # 1. IL TUO BLOCCO: Aspettiamo tra i 10 e i 20 secondi per simulare una pausa lunga
-        attesa = random.uniform(10.0, 20.0)
-        print(f"⏳ Attendo {attesa:.2f} secondi prima della chiamata...")
-        time.sleep(attesa)
-
-        # 2. CACHE BUSTER sull'URL
+        # NESSUN TIME.SLEEP GIGANTE! Così l'app risponde subito.
+        
+        # 1. CACHE BUSTER: Aggiungiamo un parametro finto per saltare le cache di rete
         cache_buster = random.randint(1000000, 9999999)
         separator = "&" if "?" in url else "?"
         url_busted = f"{url}{separator}nocache={cache_buster}"
         
-        # Header espliciti per disattivare qualsiasi forma di caching intermedio
         headers = {
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
-            "Expires": "0",
-            "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+            "Expires": "0"
         }
 
-        # 3. DISTRUZIONE CACHE: Usiamo 'with' per creare una sessione che 
-        # nasce e muore istantaneamente dopo la chiamata.
+        # 2. SESSIONE USA E GETTA: 'with' apre una connessione pulita, 
+        # scarica i dati e poi distrugge istantaneamente cache e cookie.
         with requests.Session(impersonate="chrome120") as session:
-            # Facciamo la chiamata usando questa sessione pulitissima
-            response = session.get(url_busted, headers=headers, timeout=30)
+            # Timeout abbassato a 10s per evitare errori sull'app
+            response = session.get(url_busted, headers=headers, timeout=10)
             
-        # Fuori dal blocco 'with', la sessione è stata distrutta. 
-        # Nessun cookie o connessione verrà riutilizzata per la prossima carta!
+        # A questo punto la connessione è già stata chiusa e resettata per la prossima carta!
         
         soup = BeautifulSoup(response.text, "html.parser")
         
@@ -87,10 +81,8 @@ def scrape_price(url):
                     break
 
         if prezzo_tag:
-            # Assicurati di avere la tua funzione parse_prezzo nel file
             return parse_prezzo(prezzo_tag.get_text(strip=True))
         
-        print("⚠️ Prezzo non trovato nell'HTML (possibile blocco persistente).")
         return None
         
     except Exception as e:
