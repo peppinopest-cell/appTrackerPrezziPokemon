@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 import schedule
 import time
+import random
 import threading
 import os
 import requests 
@@ -48,13 +49,36 @@ import urllib.parse
 
 def scrape_price(url):
     try:
-        # impersonate="chrome120" inganna Cloudflare/DataDome falsificando l'handshake TLS
-        response = requests.get(url, impersonate="chrome120", timeout=15)
+        # 1. IL TUO BLOCCO: Aspettiamo tra i 10 e i 20 secondi per simulare una pausa lunga
+        attesa = random.uniform(10.0, 20.0)
+        print(f"⏳ Attendo {attesa:.2f} secondi prima della chiamata...")
+        time.sleep(attesa)
+
+        # 2. CACHE BUSTER sull'URL
+        cache_buster = random.randint(1000000, 9999999)
+        separator = "&" if "?" in url else "?"
+        url_busted = f"{url}{separator}nocache={cache_buster}"
+        
+        # Header espliciti per disattivare qualsiasi forma di caching intermedio
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+        }
+
+        # 3. DISTRUZIONE CACHE: Usiamo 'with' per creare una sessione che 
+        # nasce e muore istantaneamente dopo la chiamata.
+        with requests.Session(impersonate="chrome120") as session:
+            # Facciamo la chiamata usando questa sessione pulitissima
+            response = session.get(url_busted, headers=headers, timeout=30)
+            
+        # Fuori dal blocco 'with', la sessione è stata distrutta. 
+        # Nessun cookie o connessione verrà riutilizzata per la prossima carta!
         
         soup = BeautifulSoup(response.text, "html.parser")
         
         prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-        
         if not prezzo_tag:
             tabelle = soup.select('dd.col-6.col-xl-7')
             for tag in tabelle:
@@ -63,14 +87,14 @@ def scrape_price(url):
                     break
 
         if prezzo_tag:
-            # Usa la tua funzione parse_prezzo (assicurati che esista nel file)
+            # Assicurati di avere la tua funzione parse_prezzo nel file
             return parse_prezzo(prezzo_tag.get_text(strip=True))
         
-        print("⚠️ Prezzo non trovato nel DOM.")
+        print("⚠️ Prezzo non trovato nell'HTML (possibile blocco persistente).")
         return None
         
     except Exception as e:
-        print(f"❌ Errore con curl_cffi: {e}")
+        print(f"❌ Errore durante lo scraping: {e}")
         return None
 
 @app.post("/watch")
