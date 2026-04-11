@@ -1,6 +1,8 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-cloudscraper==1.2.71
-beautifulsoup4==4.12.3
-schedule==1.2.2
-python-multipart==0.0.12
+fastapi
+uvicorn
+pydantic
+cloudscraper
+beautifulsoup4
+requests
+schedule
+curl_cffi
