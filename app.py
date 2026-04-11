@@ -79,6 +79,20 @@ async def get_watchlist(user_id: str):
     cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
     return [{"id": row[0], "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '), "url": row[1], "last_price": row[2]} for row in cur.fetchall()]
 
+@app.delete("/watch/{watch_id}")
+async def delete_watch(watch_id: int):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM watchlist WHERE id=?", (watch_id,))
+    conn.commit()
+    return {"status": "eliminata"}
+
+@app.delete("/watchlist/{user_id}/clear")
+async def clear_watchlist(user_id: str):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
+    conn.commit()
+    return {"status": "svuotata"}
+
 def job_check_prices():
     print(f"🔍 Controllo prezzi in corso...")
     cur = conn.cursor()
