@@ -6,3 +6,4 @@ beautifulsoup4
 requests
 schedule
 curl_cffi
+curl-cffi
