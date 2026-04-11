@@ -9,8 +9,12 @@ import time
 import random
 import threading
 import os
-import requests 
-from curl_cffi import requests 
+import urllib.parse
+
+# IMPORTANTE: Importiamo la libreria standard requests come std_requests per Telegram, 
+# e curl_cffi per lo scraping, così non si pestano i piedi a vicenda!
+import requests as std_requests
+from curl_cffi import requests as cffi_requests
 
 app = FastAPI(title="🃏 Price Bot API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -41,53 +45,55 @@ def send_telegram_message(testo):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": testo}
     try:
-        requests.post(url, json=payload)
+        # Usiamo requests standard per chiamare le API di Telegram
+        std_requests.post(url, json=payload)
     except Exception as e:
         print(f"Errore Telegram: {e}")
 
-import urllib.parse
+def scrape_price(url, max_retries=3):
+    headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0"
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            cache_buster = random.randint(1000000, 9999999)
+            separator = "&" if "?" in url else "?"
+            url_busted = f"{url}{separator}nocache={cache_buster}"
 
-def scrape_price(url):
-    try:
-        # NESSUN TIME.SLEEP GIGANTE! Così l'app risponde subito.
-        
-        # 1. CACHE BUSTER: Aggiungiamo un parametro finto per saltare le cache di rete
-        cache_buster = random.randint(1000000, 9999999)
-        separator = "&" if "?" in url else "?"
-        url_busted = f"{url}{separator}nocache={cache_buster}"
-        
-        headers = {
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0"
-        }
-
-        # 2. SESSIONE USA E GETTA: 'with' apre una connessione pulita, 
-        # scarica i dati e poi distrugge istantaneamente cache e cookie.
-        with requests.Session(impersonate="chrome120") as session:
-            # Timeout abbassato a 10s per evitare errori sull'app
-            response = session.get(url_busted, headers=headers, timeout=10)
+            # Usiamo curl_cffi per eludere Cloudflare
+            with cffi_requests.Session(impersonate="chrome120") as session:
+                response = session.get(url_busted, headers=headers, timeout=12)
             
-        # A questo punto la connessione è già stata chiusa e resettata per la prossima carta!
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-        if not prezzo_tag:
-            tabelle = soup.select('dd.col-6.col-xl-7')
-            for tag in tabelle:
-                if '€' in tag.text:
-                    prezzo_tag = tag
-                    break
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+            if not prezzo_tag:
+                tabelle = soup.select('dd.col-6.col-xl-7')
+                for tag in tabelle:
+                    if '€' in tag.text:
+                        prezzo_tag = tag
+                        break
 
-        if prezzo_tag:
-            return parse_prezzo(prezzo_tag.get_text(strip=True))
+            if prezzo_tag:
+                # TRIONFO! Trovato il prezzo, usciamo subito dal ciclo.
+                return parse_prezzo(prezzo_tag.get_text(strip=True))
+            
+            print(f"⚠️ Tentativo {attempt + 1} di {max_retries} fallito.")
+            
+        except Exception as e:
+            print(f"❌ Errore al tentativo {attempt + 1}: {e}")
         
-        return None
-        
-    except Exception as e:
-        print(f"❌ Errore durante lo scraping: {e}")
-        return None
+        # Pausa prima di riprovare
+        if attempt < max_retries - 1:
+            attesa = random.uniform(2.5, 4.5)
+            print(f"⏳ Ritento tra {attesa:.1f} sec...")
+            time.sleep(attesa)
+            
+    # Se esce dal ciclo, tutti i tentativi sono falliti
+    return None
 
 @app.post("/watch")
 async def add_watch(item: WatchItem):
@@ -97,16 +103,27 @@ async def add_watch(item: WatchItem):
     if "cardmarket.com" not in final_url:
         raise HTTPException(status_code=400, detail="URL non valido")
     
+    # 1. Tentativo di estrazione del prezzo (ora farà i 3 tentativi)
     current_price = scrape_price(final_url)
+    
     nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
     
+    # 2. CONTROLLO DI SICUREZZA: se il prezzo è None, FERMIAMO TUTTO!
+    if current_price is None:
+        print(f"❌ Impossibile estrarre il prezzo per {nome}. Nessun salvataggio nel DB.")
+        raise HTTPException(
+            status_code=400, 
+            detail="Blocco di sicurezza da parte di Cardmarket. Nessun prezzo trovato, la carta non è stata salvata."
+        )
+    
+    # 3. Il prezzo c'è, procediamo col salvataggio nel DB
     cur = conn.cursor()
     cur.execute("INSERT INTO watchlist (user_id, url, last_price, created_at) VALUES (?, ?, ?, ?)",
                 (item.user_id, final_url, current_price, datetime.now().isoformat()))
     conn.commit()
     
-    if current_price is not None:
-        send_telegram_message(f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {current_price}€")
+    # Mandiamo il messaggio Telegram
+    send_telegram_message(f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {current_price}€")
         
     return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": current_price}
 
@@ -139,13 +156,18 @@ def job_check_prices():
         watch_id, url, old_price = row
         new_price = scrape_price(url)
         
+        # Qui il bot in background aggiorna il prezzo SOLO SE nuovo_price NON è None
         if new_price is not None:
             nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
             if old_price is None or new_price != old_price:
                 msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
                 send_telegram_message(msg)
+                
+                cur = conn.cursor() # apriamo un nuovo cursore per l'update
                 cur.execute("UPDATE watchlist SET last_price=? WHERE id=?", (new_price, watch_id))
                 conn.commit()
+        else:
+            print(f"⚠️ Bot bloccato su {url}. Mantengo il vecchio prezzo in memoria.")
 
 def run_scheduler():
     schedule.every(1).minutes.do(job_check_prices)
