@@ -44,26 +44,35 @@ def send_telegram_message(testo):
     except Exception as e:
         print(f"Errore Telegram: {e}")
 
+import urllib.parse
+
 def scrape_price(url):
     try:
-        # Trucco anti-blocco: diciamo a cloudscraper di fingersi il bot di indicizzazione di Google
-        scraper = cloudscraper.create_scraper()
+        # Prepariamo l'URL per darlo in pasto a Google
+        encoded_url = urllib.parse.quote(url)
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.google.com/'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, come Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         
-        response = scraper.get(url, headers=headers, timeout=15)
+        # TENTATIVO 1: Usiamo il proxy di Google Translate! 
+        # (Google scarica la pagina per noi sui suoi server e ce la restituisce, bypassando Cloudflare)
+        translate_url = f"https://translate.google.com/translate?hl=it&sl=it&tl=it&u={encoded_url}"
+        
+        # Usiamo il modulo 'requests' normale, tanto Google non ci blocca l'IP
+        response = requests.get(translate_url, headers=headers, timeout=15)
+        
+        # Se Google Translate fallisce, proviamo con la Google Cache (fotografia della pagina)
+        if response.status_code != 200:
+            cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{encoded_url}"
+            response = requests.get(cache_url, headers=headers, timeout=15)
+            
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # 1. Ricerca classica
+        # Ricerca del prezzo (la struttura HTML rimane uguale anche se scaricata da Google)
         prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
         
-        # 2. Ricerca di riserva nella tabella (se la prima fallisce)
+        # Metodo di riserva se il primo span non si trova
         if not prezzo_tag:
             tabelle = soup.select('dd.col-6.col-xl-7')
             for tag in tabelle:
@@ -74,11 +83,11 @@ def scrape_price(url):
         if prezzo_tag:
             return parse_prezzo(prezzo_tag.get_text(strip=True))
         
-        print("⚠️ HTML scaricato ma prezzo non trovato. Forse Cloudflare ha bloccato anche Googlebot.")
+        print("⚠️ Prezzo non trovato tramite i server di Google.")
         return None
         
     except Exception as e:
-        print(f"❌ Errore scraper: {e}")
+        print(f"❌ Errore nello scraper Google: {e}")
         return None
 
 @app.post("/watch")
