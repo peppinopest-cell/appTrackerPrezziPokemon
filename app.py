@@ -46,12 +46,24 @@ def send_telegram_message(testo):
 
 def scrape_price(url):
     try:
-        # Usa curl_cffi per bypassare Cloudflare simulando perfettamente Chrome 110
-        response = curl_requests.get(url, impersonate="chrome110", timeout=15)
+        # Trucco anti-blocco: diciamo a cloudscraper di fingersi il bot di indicizzazione di Google
+        scraper = cloudscraper.create_scraper()
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.google.com/'
+        }
+        
+        response = scraper.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, "html.parser")
         
+        # 1. Ricerca classica
         prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
         
+        # 2. Ricerca di riserva nella tabella (se la prima fallisce)
         if not prezzo_tag:
             tabelle = soup.select('dd.col-6.col-xl-7')
             for tag in tabelle:
@@ -61,9 +73,12 @@ def scrape_price(url):
 
         if prezzo_tag:
             return parse_prezzo(prezzo_tag.get_text(strip=True))
+        
+        print("⚠️ HTML scaricato ma prezzo non trovato. Forse Cloudflare ha bloccato anche Googlebot.")
         return None
+        
     except Exception as e:
-        print(f"Errore scraper: {e}")
+        print(f"❌ Errore scraper: {e}")
         return None
 
 @app.post("/watch")
