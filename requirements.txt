@@ -1,9 +1,7 @@
-fastapi
-uvicorn
-pydantic
-cloudscraper
-beautifulsoup4
-requests
-schedule
-curl_cffi
-curl-cffi
+seleniumbase==4.25.1
+beautifulsoup4==4.12.3
+fastapi==0.110.0
+uvicorn==0.27.1
+schedule==1.2.1
+pydantic==2.6.3
+requests==2.31.0
