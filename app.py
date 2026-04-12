@@ -72,43 +72,57 @@ async def ping_user(user_id: str):
     return {"status": "ok", "user": user_id}
 
 def scrape_price(url, max_retries=3):
-    # Generiamo header ultra-realistici
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Sec-Ch-Ua": "\"Google Chrome\";v=\"123\", \"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"123\"",
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": "\"Windows\"",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Cache-Control": "max-age=0"
-    }
+    # Creiamo una lista di "identità" (Impersonation + User-Agent corrispondente)
+    identities = [
+        {
+            "impersonate": "safari15_5",
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+        },
+        {
+            "impersonate": "chrome110",
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+        },
+        {
+            "impersonate": "edge101",
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36 Edg/101.0.1210.53"
+        }
+    ]
     
     for attempt in range(max_retries):
         try:
+            # Scegliamo un'identità a caso per questo tentativo
+            identity = random.choice(identities)
+            
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "User-Agent": identity["ua"],
+                "Cache-Control": "max-age=0"
+            }
+
             cache_buster = random.randint(1000000, 9999999)
             separator = "&" if "?" in url else "?"
             url_busted = f"{url}{separator}nocache={cache_buster}"
 
-            # Cambiamo impersonate da chrome120 a safari15_5, a volte Cloudflare
-            # è più permissivo con i Mac che con Windows dai datacenter
             response = cffi_requests.get(
                 url_busted, 
-                impersonate="safari15_5", 
+                impersonate=identity["impersonate"], 
                 headers=headers, 
                 timeout=15
             )
             
-            print(f"🌐 Scraping tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
+            print(f"🌐 Scraping ({identity['impersonate']}) tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
             
-            # Se Cloudflare ci ha beccato, il codice non è 200, è 403
             if response.status_code == 403:
-                print("❌ Cloudflare ci ha bloccato (403 Forbidden). IP del server segnalato.")
+                print(f"❌ Cloudflare ha bloccato questa identità ({identity['impersonate']}).")
+                # Se fallisce, il ciclo riproverà con (probabilmente) un'altra identità!
+                continue
             
             soup = BeautifulSoup(response.text, "html.parser")
             
@@ -122,13 +136,16 @@ def scrape_price(url, max_retries=3):
 
             if prezzo_tag:
                 prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
-                print(f"✅ PREZZO TROVATO al tentativo {attempt + 1}: {prezzo}€")
+                print(f"✅ PREZZO TROVATO: {prezzo}€")
                 return prezzo
+            else:
+                print("⚠️ Pagina caricata, ma prezzo non trovato (possibile blocco invisibile).")
             
         except Exception as e:
             print(f"❌ Errore al tentativo {attempt + 1}: {e}")
         
-        time.sleep(random.uniform(3.5, 6.5))
+        # Pausa lunga e variabile per sembrare umani tra un tentativo e l'altro
+        time.sleep(random.uniform(4.0, 7.5))
             
     return None
 
