@@ -9,7 +9,6 @@ import time
 import random
 import threading
 import os
-import urllib.parse
 
 import requests as std_requests
 from curl_cffi import requests as cffi_requests
@@ -23,13 +22,17 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")  # . = cartella corrente persistente
+# DB PERSISTENTE: ./ = cartella corrente, non /tmp che si cancella!
+DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")
+print(f"📁 DB_PATH impostato su: {DB_PATH}")
+
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute('''
     CREATE TABLE IF NOT EXISTS watchlist
     (id INTEGER PRIMARY KEY, user_id TEXT, url TEXT, last_price REAL, created_at TEXT)
 ''')
 conn.commit()
+print("✅ Database inizializzato")
 
 BOT_TOKEN = "8470410976:AAEJDujquJMbNVHy48Js6dJw6O6qmf3QJds"
 CHAT_ID = "393014146"
@@ -57,9 +60,9 @@ def send_telegram_message(testo):
     payload = {"chat_id": CHAT_ID, "text": testo}
     try:
         std_requests.post(url, json=payload, timeout=10)
-        print("📨 Telegram inviato")
+        print("📨 Telegram OK")
     except Exception as e:
-        print(f"Errore Telegram: {e}")
+        print(f"❌ Errore Telegram: {e}")
 
 
 def scrape_price(url, max_retries=3):
@@ -78,7 +81,7 @@ def scrape_price(url, max_retries=3):
             with cffi_requests.Session(impersonate="chrome120") as session:
                 response = session.get(url_busted, headers=headers, timeout=12)
 
-            print(f"🌐 Tentativo {attempt + 1}/{max_retries} - status {response.status_code}")
+            print(f"🌐 Scraping tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
 
             soup = BeautifulSoup(response.text, "html.parser")
 
@@ -91,161 +94,4 @@ def scrape_price(url, max_retries=3):
                         break
 
             if prezzo_tag:
-                prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
-                print(f"✅ Prezzo trovato al tentativo {attempt + 1}: {prezzo}")
-                return prezzo
-
-            print(f"⚠️ Tentativo {attempt + 1} di {max_retries} fallito: prezzo non trovato")
-
-        except Exception as e:
-            print(f"❌ Errore al tentativo {attempt + 1}: {e}")
-
-        if attempt < max_retries - 1:
-            attesa = random.uniform(2.5, 4.5)
-            print(f"⏳ Ritento tra {attesa:.1f} sec...")
-            time.sleep(attesa)
-
-    print("❌ Tutti i tentativi falliti")
-    return None
-
-
-@app.post("/watch")
-async def add_watch(item: WatchItem):
-    clean_url = item.card_url.split('?')[0]
-    final_url = f"{clean_url}?language=5&minCondition=2"
-
-    if "cardmarket.com" not in final_url:
-        raise HTTPException(status_code=400, detail="URL non valido")
-
-    print(f"📥 Nuova carta da aggiungere: {final_url}")
-
-    current_price = scrape_price(final_url)
-    nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
-
-    if current_price is None:
-        print(f"❌ Impossibile estrarre il prezzo per {nome}. Nessun salvataggio nel DB.")
-        raise HTTPException(
-            status_code=400,
-            detail="Blocco di sicurezza da parte di Cardmarket. Nessun prezzo trovato, la carta non è stata salvata."
-        )
-
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO watchlist (user_id, url, last_price, created_at) VALUES (?, ?, ?, ?)",
-        (item.user_id, final_url, current_price, datetime.now().isoformat())
-    )
-    conn.commit()
-
-    send_telegram_message(f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {current_price}€")
-
-    return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": current_price}
-
-
-@app.get("/watchlist/{user_id}")
-async def get_watchlist(user_id: str):
-    cur = conn.cursor()
-    cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
-    return [
-        {
-            "id": row[0],
-            "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '),
-            "url": row[1],
-            "last_price": row[2]
-        }
-        for row in cur.fetchall()
-    ]
-
-
-@app.delete("/watch/{watch_id}")
-async def delete_watch(watch_id: int):
-    cur = conn.cursor()
-    cur.execute("DELETE FROM watchlist WHERE id=?", (watch_id,))
-    conn.commit()
-    return {"status": "eliminata"}
-
-
-@app.delete("/watchlist/{user_id}/clear")
-async def clear_watchlist(user_id: str):
-    cur = conn.cursor()
-    cur.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
-    conn.commit()
-    return {"status": "svuotata"}
-
-
-def job_check_prices():
-    if not job_lock.acquire(blocking=False):
-        print("⏭️ Job saltato: esecuzione precedente ancora in corso")
-        return
-
-    try:
-        print("🔍 Controllo prezzi in corso...")
-        cur = conn.cursor()
-        cur.execute("SELECT id, url, last_price FROM watchlist")
-        rows = cur.fetchall()
-
-        if not rows:
-            print("📭 Nessuna carta in watchlist")
-            send_telegram_message("ℹ️ TEST JOB: watchlist vuota, scheduler attivo.")
-            return
-
-        for row in rows:
-            watch_id, url, old_price = row
-            nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
-
-            print(f"🃏 Controllo carta id={watch_id} - {nome}")
-            new_price = scrape_price(url)
-
-            if new_price is not None:
-                if old_price is None or new_price != old_price:
-                    msg = (
-                        f"🚨 AGGIORNAMENTO PREZZO!\n"
-                        f"🃏 {nome}\n"
-                        f"💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n"
-                        f"🔗 {url}"
-                    )
-                    send_telegram_message(msg)
-
-                    cur_update = conn.cursor()
-                    cur_update.execute(
-                        "UPDATE watchlist SET last_price=? WHERE id=?",
-                        (new_price, watch_id)
-                    )
-                    conn.commit()
-
-                    print(f"✅ Prezzo aggiornato nel DB per {nome}")
-                else:
-                    msg = (
-                        f"🧪 TEST JOB OK\n"
-                        f"🃏 {nome}\n"
-                        f"💶 Prezzo invariato: {new_price}€\n"
-                        f"🔗 {url}"
-                    )
-                    send_telegram_message(msg)
-                    print(f"ℹ️ Prezzo invariato per {nome}, notifica test inviata")
-            else:
-                msg = (
-                    f"⚠️ TEST JOB FALLITO\n"
-                    f"🃏 {nome}\n"
-                    f"❌ Prezzo non trovato\n"
-                    f"🔗 {url}"
-                )
-                send_telegram_message(msg)
-                print(f"⚠️ Bot bloccato su {url}. Mantengo il vecchio prezzo in memoria.")
-
-    finally:
-        job_lock.release()
-
-
-def run_scheduler():
-    schedule.every(1).minutes.do(job_check_prices)
-    print("⏰ Scheduler avviato: controllo ogni 1 minuto")
-    while True:
-        schedule.run_pending()
-        time.sleep(10)
-
-
-threading.Thread(target=run_scheduler, daemon=True).start()
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+                prezzo = parse_prezzo(prezzo_tag
