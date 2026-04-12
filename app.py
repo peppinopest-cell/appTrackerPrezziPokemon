@@ -50,8 +50,20 @@ def send_telegram_message(testo):
     except Exception as e:
         print(f"Errore Telegram: {e}")
 
-def scrape_price(url, max_retries=3):
+def scrape_price(url, max_retries=5):
+    # Header COMPLETI di un Chrome 131 reale che naviga da Italia
     headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Pragma": "no-cache",
         "Expires": "0"
@@ -63,9 +75,11 @@ def scrape_price(url, max_retries=3):
             separator = "&" if "?" in url else "?"
             url_busted = f"{url}{separator}nocache={cache_buster}"
 
-            # Usiamo curl_cffi per eludere Cloudflare
-            with cffi_requests.Session(impersonate="chrome120") as session:
+            with cffi_requests.Session(impersonate="chrome131") as session:  # Chrome 131 è più recente
                 response = session.get(url_busted, headers=headers, timeout=12)
+            
+            # Log per capire cosa succede
+            print(f"Status: {response.status_code}, Tentativo {attempt+1}/{max_retries}")
             
             soup = BeautifulSoup(response.text, "html.parser")
             
@@ -78,21 +92,21 @@ def scrape_price(url, max_retries=3):
                         break
 
             if prezzo_tag:
-                # TRIONFO! Trovato il prezzo, usciamo subito dal ciclo.
-                return parse_prezzo(prezzo_tag.get_text(strip=True))
+                prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
+                print(f"✅ PREZZO TROVATO: {prezzo}€")
+                return prezzo
             
-            print(f"⚠️ Tentativo {attempt + 1} di {max_retries} fallito.")
+            print(f"⚠️ Nessun prezzo trovato nell'HTML (tentativo {attempt+1})")
             
         except Exception as e:
-            print(f"❌ Errore al tentativo {attempt + 1}: {e}")
+            print(f"❌ Errore al tentativo {attempt+1}: {e}")
         
-        # Pausa prima di riprovare
         if attempt < max_retries - 1:
-            attesa = random.uniform(2.5, 4.5)
-            print(f"⏳ Ritento tra {attesa:.1f} sec...")
+            attesa = random.uniform(5.0, 10.0)
+            print(f"⏳ Pausa {attesa:.1f}s prima del ritentativo...")
             time.sleep(attesa)
-            
-    # Se esce dal ciclo, tutti i tentativi sono falliti
+    
+    print("❌ Tutti i tentativi falliti")
     return None
 
 @app.post("/watch")
