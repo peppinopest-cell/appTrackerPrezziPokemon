@@ -49,14 +49,14 @@ class WatchItem(BaseModel):
 
 
 def clear_runtime_cache():
-    print("🧹 Svuoto cache/runtime...")
     gc.collect()
+    print("🧹 CACHE CLEAR eseguito")
 
 
 @app.on_event("startup")
 def startup_clear_cache():
     clear_runtime_cache()
-    print("🚀 Avvio backend: cache/runtime svuotata.")
+    print("🚀 Startup completato con cache svuotata")
 
 
 def parse_prezzo(prezzo_str):
@@ -78,7 +78,24 @@ def send_telegram_message(testo):
         print(f"Errore Telegram: {e}")
 
 
-def scrape_price(url):
+def extract_price_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+    if not prezzo_tag:
+        tabelle = soup.select("dd.col-6.col-xl-7")
+        for tag in tabelle:
+            if "€" in tag.text:
+                prezzo_tag = tag
+                break
+
+    if prezzo_tag:
+        return parse_prezzo(prezzo_tag.get_text(strip=True))
+
+    return None
+
+
+def scrape_price_once(url):
     clear_runtime_cache()
 
     headers = {
@@ -106,36 +123,51 @@ def scrape_price(url):
         with cffi_requests.Session(impersonate="chrome131") as session:
             response = session.get(url_busted, headers=headers, timeout=12)
 
-        print(f"Status: {response.status_code}")
+        print(f"🌐 Status: {response.status_code}")
+        prezzo = extract_price_from_html(response.text)
 
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-        if not prezzo_tag:
-            tabelle = soup.select("dd.col-6.col-xl-7")
-            for tag in tabelle:
-                if "€" in tag.text:
-                    prezzo_tag = tag
-                    break
-
-        if prezzo_tag:
-            prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
+        if prezzo is not None:
             print(f"✅ PREZZO TROVATO: {prezzo}€")
             clear_runtime_cache()
             return prezzo
 
-        print("❌ Nessun prezzo trovato nell'HTML")
+        print("⚠️ Nessun prezzo trovato nell'HTML")
         clear_runtime_cache()
         return None
 
     except Exception as e:
-        print(f"❌ Errore scrape: {e}")
+        print(f"❌ Errore scrape singolo: {e}")
         clear_runtime_cache()
         return None
 
 
+def scrape_price(url):
+    print("🔎 Avvio scraping con massimo 2 tentativi")
+    clear_runtime_cache()
+
+    first_try = scrape_price_once(url)
+    if first_try is not None:
+        clear_runtime_cache()
+        return first_try
+
+    wait_time = random.uniform(4.0, 7.0)
+    print(f"⏳ Primo tentativo fallito, attendo {wait_time:.1f}s prima del secondo")
+    time.sleep(wait_time)
+
+    clear_runtime_cache()
+    second_try = scrape_price_once(url)
+    if second_try is not None:
+        clear_runtime_cache()
+        return second_try
+
+    print("❌ Falliti entrambi i tentativi")
+    clear_runtime_cache()
+    return None
+
+
 @app.post("/watch")
 async def add_watch(item: WatchItem):
+    print("📥 /watch chiamato")
     clear_runtime_cache()
 
     clean_url = item.card_url.split("?")[0]
@@ -145,15 +177,14 @@ async def add_watch(item: WatchItem):
         raise HTTPException(status_code=400, detail="URL non valido")
 
     current_price = scrape_price(final_url)
-
     nome = final_url.split("/")[-1].split("?")[0].replace("-", " ")
 
     if current_price is None:
-        print(f"❌ Impossibile estrarre il prezzo per {nome}. Nessun salvataggio nel DB.")
+        print(f"❌ Prezzo non trovato per {nome}. Nessun salvataggio DB.")
         clear_runtime_cache()
         raise HTTPException(
             status_code=400,
-            detail="Prezzo non trovato al primo tentativo. Carta non salvata."
+            detail="Prezzo non trovato dopo 2 tentativi. Carta non salvata."
         )
 
     cur = conn.cursor()
@@ -171,10 +202,13 @@ async def add_watch(item: WatchItem):
 
 @app.get("/watchlist/{user_id}")
 async def get_watchlist(user_id: str):
+    print(f"📋 Lettura watchlist per user_id={user_id}")
     clear_runtime_cache()
+
     cur = conn.cursor()
     cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
     rows = cur.fetchall()
+
     clear_runtime_cache()
     return [
         {
@@ -189,26 +223,32 @@ async def get_watchlist(user_id: str):
 
 @app.delete("/watch/{watch_id}")
 async def delete_watch(watch_id: int):
+    print(f"🗑️ Elimino watch_id={watch_id}")
     clear_runtime_cache()
+
     cur = conn.cursor()
     cur.execute("DELETE FROM watchlist WHERE id=?", (watch_id,))
     conn.commit()
+
     clear_runtime_cache()
     return {"status": "eliminata"}
 
 
 @app.delete("/watchlist/{user_id}/clear")
 async def clear_watchlist(user_id: str):
+    print(f"🧹 Svuoto watchlist user_id={user_id}")
     clear_runtime_cache()
+
     cur = conn.cursor()
     cur.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
     conn.commit()
+
     clear_runtime_cache()
     return {"status": "svuotata"}
 
 
 def job_check_prices():
-    print("🔍 Controllo prezzi in corso...")
+    print("🔍 Controllo prezzi schedulato in corso...")
     clear_runtime_cache()
 
     cur = conn.cursor()
@@ -218,11 +258,13 @@ def job_check_prices():
     for row in rows:
         watch_id, url, old_price = row
 
+        print(f"🔄 Controllo carta id={watch_id}")
         clear_runtime_cache()
+
         new_price = scrape_price(url)
 
         if new_price is None:
-            print(f"❌ Prezzo non trovato per {url}. Nessun update.")
+            print(f"⚠️ Prezzo non trovato per {url}. Mantengo il vecchio prezzo.")
             clear_runtime_cache()
             continue
 
