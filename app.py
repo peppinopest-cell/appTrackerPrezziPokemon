@@ -23,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-DB_PATH = os.getenv("DB_PATH", "/tmp/watchlist_v4.db")
+DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")  # . = cartella corrente persistente
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute('''
     CREATE TABLE IF NOT EXISTS watchlist
