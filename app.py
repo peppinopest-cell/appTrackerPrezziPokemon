@@ -269,7 +269,7 @@ def job_check_prices():
         job_lock.release()
 
 def run_scheduler():
-    schedule.every(5).minutes.do(job_check_prices)
+    schedule.every(1).minutes.do(job_check_prices)
     print("⏰ Scheduler avviato: controllo ogni 5 minuti (solo per utenti con app aperta)")
     while True:
         schedule.run_pending()
