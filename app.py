@@ -67,38 +67,48 @@ async def ping_user(user_id: str):
 def scrape_price(url, max_retries=3):
     identities = [
         {
+            "name": "safari-main",
             "impersonate": "safari15_5",
-            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
-        },
-        {
-            "impersonate": "chrome110",
-            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
-        },
-        {
-            "impersonate": "edge101",
-            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36 Edg/101.0.1210.53"
-        }
-    ]
-
-    for attempt in range(max_retries):
-        try:
-            identity = random.choice(identities)
-
-            headers = {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                 "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Sec-Ch-Ua": "\"Google Chrome\";v=\"123\", \"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"123\"",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+            }
+        },
+        {
+            "name": "chrome-fallback",
+            "impersonate": "chrome120",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "Sec-Ch-Ua": "\"Google Chrome\";v=\"120\", \"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"120\"",
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": "\"Windows\"",
                 "Sec-Fetch-Dest": "document",
                 "Sec-Fetch-Mode": "navigate",
                 "Sec-Fetch-Site": "none",
                 "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
-                "User-Agent": identity["ua"],
-                "Cache-Control": "max-age=0"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
+        }
+    ]
+
+    for attempt in range(max_retries):
+        try:
+            if attempt == 0:
+                identity = identities[0]
+            else:
+                identity = identities[min(attempt, len(identities) - 1)]
+
+            micro_wait = random.uniform(1.2, 3.2)
+            print(f"⏳ Micro-pausa pre-request: {micro_wait:.1f}s")
+            time.sleep(micro_wait)
 
             cache_buster = random.randint(1000000, 9999999)
             separator = "&" if "?" in url else "?"
@@ -107,42 +117,49 @@ def scrape_price(url, max_retries=3):
             response = cffi_requests.get(
                 url_busted,
                 impersonate=identity["impersonate"],
-                headers=headers,
-                timeout=15
+                headers=identity["headers"],
+                timeout=18
             )
 
-            print(f"🌐 Scraping ({identity['impersonate']}) tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
+            print(f"🌐 [{identity['name']}] tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
 
             if response.status_code == 403:
-                print(f"❌ Bloccato su questa identità ({identity['impersonate']})")
-                time.sleep(random.uniform(2.5, 5.0))
+                print(f"❌ 403 con identità {identity['name']}")
+                time.sleep(random.uniform(4.0, 7.0))
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
 
             prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+
             if not prezzo_tag:
                 tabelle = soup.select("dd.col-6.col-xl-7")
                 for tag in tabelle:
-                    if "€" in tag.text:
+                    txt = tag.get_text(" ", strip=True)
+                    if "€" in txt:
                         prezzo_tag = tag
                         break
 
             if prezzo_tag:
                 prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
-                print(f"✅ PREZZO TROVATO al tentativo {attempt + 1}: {prezzo}€")
-                return prezzo
+                if prezzo is not None:
+                    print(f"✅ PREZZO TROVATO con {identity['name']}: {prezzo}€")
+                    return prezzo
+
+            print(f"⚠️ Prezzo non trovato con {identity['name']} al tentativo {attempt + 1}")
 
         except Exception as e:
             print(f"❌ Errore al tentativo {attempt + 1}: {e}")
 
-        time.sleep(random.uniform(3.5, 6.5))
+        retry_wait = random.uniform(4.5, 8.5)
+        print(f"⏳ Attesa retry: {retry_wait:.1f}s")
+        time.sleep(retry_wait)
 
     return None
 
 @app.post("/watch")
 async def add_watch(item: WatchItem):
-    clean_url = item.card_url.split("?")[0]
+    clean_url = item.card_url.split('?')[0]
     final_url = f"{clean_url}?language=5&minCondition=2"
 
     if "cardmarket.com" not in final_url:
@@ -153,7 +170,7 @@ async def add_watch(item: WatchItem):
     print(f"📥 Nuova carta da aggiungere: {final_url}")
     current_price = scrape_price(final_url)
 
-    nome = final_url.split("/")[-1].split("?")[0].replace("-", " ")
+    nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
 
     if current_price is None:
         print(f"❌ Impossibile estrarre il prezzo per {nome}. Nessun salvataggio nel DB.")
@@ -179,7 +196,7 @@ async def get_watchlist(user_id: str):
     return [
         {
             "id": row[0],
-            "nome": row[1].split("/")[-1].split("?")[0].replace("-", " "),
+            "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '),
             "url": row[1],
             "last_price": row[2]
         }
@@ -223,9 +240,9 @@ def job_check_prices():
                 print(f"😴 Utente offline ({user_id}). Salto aggiornamento per id={watch_id}")
                 continue
 
-            nome = url.split("/")[-1].split("?")[0].replace("-", " ")
-
+            nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
             print(f"🃏 Controllo carta id={watch_id} - {nome}")
+
             new_price = scrape_price(url)
 
             if new_price is not None:
@@ -238,16 +255,14 @@ def job_check_prices():
                     conn.commit()
                     print(f"✅ Prezzo aggiornato nel DB per {nome}")
                 else:
-                    msg = f"🧪 TEST JOB OK (App aperta)\n🃏 {nome}\n💶 Prezzo invariato: {new_price}€\n🔗 {url}"
-                    send_telegram_message(msg)
-                    print(f"ℹ️ Prezzo invariato per {nome}, notifica test inviata")
+                    print(f"ℹ️ Prezzo invariato per {nome}")
             else:
                 msg = f"⚠️ TEST JOB FALLITO\n🃏 {nome}\n❌ Prezzo non trovato\n🔗 {url}"
                 send_telegram_message(msg)
-                print(f"⚠️ Bot bloccato su {url}. Mantengo il vecchio prezzo in memoria.")
+                print(f"⚠️ Bot bloccato o prezzo non trovato su {url}")
 
-            attesa_umana = random.uniform(10.0, 20.0)
-            print(f"⏳ Pausa di {attesa_umana:.1f} secondi prima della prossima carta...")
+            attesa_umana = random.uniform(12.0, 22.0)
+            print(f"⏳ Pausa tra carte: {attesa_umana:.1f}s")
             time.sleep(attesa_umana)
 
     finally:
