@@ -10,21 +10,18 @@ import random
 import threading
 import os
 
-# IMPORTANTE: Importiamo la libreria standard requests come std_requests per Telegram, 
-# e curl_cffi per lo scraping, così non si pestano i piedi a vicenda!
 import requests as std_requests
 from curl_cffi import requests as cffi_requests
 
 app = FastAPI(title="🃏 Price Bot API")
 app.add_middleware(
-    CORSMiddleware, 
-    allow_origins=["*"], 
-    allow_credentials=True, 
-    allow_methods=["*"], 
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"]
 )
 
-# 1. DB PERSISTENTE: ./ invece di /tmp
 DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")
 print(f"📁 DB_PATH impostato su: {DB_PATH}")
 
@@ -34,14 +31,10 @@ conn.execute('''CREATE TABLE IF NOT EXISTS watchlist
 conn.commit()
 print("✅ Database inizializzato")
 
-# --- I TUOI DATI TELEGRAM ---
 BOT_TOKEN = "8470410976:AAEJDujquJMbNVHy48Js6dJw6O6qmf3QJds"
 CHAT_ID = "393014146"
 
-# Lock per evitare esecuzioni sovrapposte del job schedulato
 job_lock = threading.Lock()
-
-# --- NUOVO: Dizionario per tracciare chi ha l'app aperta ---
 active_users = {}
 
 class WatchItem(BaseModel):
@@ -49,11 +42,12 @@ class WatchItem(BaseModel):
     card_url: str
 
 def parse_prezzo(prezzo_str):
-    if not prezzo_str or prezzo_str == "N/D": return None
-    try: 
+    if not prezzo_str or prezzo_str == "N/D":
+        return None
+    try:
         pulito = prezzo_str.replace("€", "").replace(".", "").replace(",", ".").strip()
         return float(pulito)
-    except: 
+    except:
         return None
 
 def send_telegram_message(testo):
@@ -65,58 +59,72 @@ def send_telegram_message(testo):
     except Exception as e:
         print(f"❌ Errore Telegram: {e}")
 
-# --- NUOVO: Endpoint per ricevere il "battito" dall'app ---
 @app.get("/ping/{user_id}")
 async def ping_user(user_id: str):
     active_users[user_id] = time.time()
     return {"status": "ok", "user": user_id}
 
 def scrape_price(url, max_retries=3):
-    # Generiamo header ultra-realistici
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Sec-Ch-Ua": "\"Google Chrome\";v=\"123\", \"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"123\"",
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": "\"Windows\"",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Cache-Control": "max-age=0"
-    }
-    
+    identities = [
+        {
+            "impersonate": "safari15_5",
+            "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+        },
+        {
+            "impersonate": "chrome110",
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+        },
+        {
+            "impersonate": "edge101",
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36 Edg/101.0.1210.53"
+        }
+    ]
+
     for attempt in range(max_retries):
         try:
+            identity = random.choice(identities)
+
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Sec-Ch-Ua": "\"Google Chrome\";v=\"123\", \"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"123\"",
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": "\"Windows\"",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "User-Agent": identity["ua"],
+                "Cache-Control": "max-age=0"
+            }
+
             cache_buster = random.randint(1000000, 9999999)
             separator = "&" if "?" in url else "?"
             url_busted = f"{url}{separator}nocache={cache_buster}"
 
-            # Cambiamo impersonate da chrome120 a safari15_5, a volte Cloudflare
-            # è più permissivo con i Mac che con Windows dai datacenter
             response = cffi_requests.get(
-                url_busted, 
-                impersonate="safari15_5", 
-                headers=headers, 
+                url_busted,
+                impersonate=identity["impersonate"],
+                headers=headers,
                 timeout=15
             )
-            
-            print(f"🌐 Scraping tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
-            
-            # Se Cloudflare ci ha beccato, il codice non è 200, è 403
+
+            print(f"🌐 Scraping ({identity['impersonate']}) tentativo {attempt + 1}/{max_retries}: status {response.status_code}")
+
             if response.status_code == 403:
-                print("❌ Cloudflare ci ha bloccato (403 Forbidden). IP del server segnalato.")
-            
+                print(f"❌ Bloccato su questa identità ({identity['impersonate']})")
+                time.sleep(random.uniform(2.5, 5.0))
+                continue
+
             soup = BeautifulSoup(response.text, "html.parser")
-            
+
             prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
             if not prezzo_tag:
-                tabelle = soup.select('dd.col-6.col-xl-7')
+                tabelle = soup.select("dd.col-6.col-xl-7")
                 for tag in tabelle:
-                    if '€' in tag.text:
+                    if "€" in tag.text:
                         prezzo_tag = tag
                         break
 
@@ -124,51 +132,59 @@ def scrape_price(url, max_retries=3):
                 prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
                 print(f"✅ PREZZO TROVATO al tentativo {attempt + 1}: {prezzo}€")
                 return prezzo
-            
+
         except Exception as e:
             print(f"❌ Errore al tentativo {attempt + 1}: {e}")
-        
+
         time.sleep(random.uniform(3.5, 6.5))
-            
+
     return None
 
 @app.post("/watch")
 async def add_watch(item: WatchItem):
-    clean_url = item.card_url.split('?')[0] 
+    clean_url = item.card_url.split("?")[0]
     final_url = f"{clean_url}?language=5&minCondition=2"
-    
+
     if "cardmarket.com" not in final_url:
         raise HTTPException(status_code=400, detail="URL non valido")
-    
-    # --- NUOVO: Se aggiunge una carta, registriamo che è attivo ---
+
     active_users[item.user_id] = time.time()
-    
+
     print(f"📥 Nuova carta da aggiungere: {final_url}")
     current_price = scrape_price(final_url)
-    
-    nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
-    
+
+    nome = final_url.split("/")[-1].split("?")[0].replace("-", " ")
+
     if current_price is None:
         print(f"❌ Impossibile estrarre il prezzo per {nome}. Nessun salvataggio nel DB.")
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Blocco di sicurezza da parte di Cardmarket. Nessun prezzo trovato, la carta non è stata salvata."
         )
-    
+
     cur = conn.cursor()
-    cur.execute("INSERT INTO watchlist (user_id, url, last_price, created_at) VALUES (?, ?, ?, ?)",
-                (item.user_id, final_url, current_price, datetime.now().isoformat()))
+    cur.execute(
+        "INSERT INTO watchlist (user_id, url, last_price, created_at) VALUES (?, ?, ?, ?)",
+        (item.user_id, final_url, current_price, datetime.now().isoformat())
+    )
     conn.commit()
-    
+
     send_telegram_message(f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {current_price}€")
-        
     return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": current_price}
 
 @app.get("/watchlist/{user_id}")
 async def get_watchlist(user_id: str):
     cur = conn.cursor()
     cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
-    return [{"id": row[0], "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '), "url": row[1], "last_price": row[2]} for row in cur.fetchall()]
+    return [
+        {
+            "id": row[0],
+            "nome": row[1].split("/")[-1].split("?")[0].replace("-", " "),
+            "url": row[1],
+            "last_price": row[2]
+        }
+        for row in cur.fetchall()
+    ]
 
 @app.delete("/watch/{watch_id}")
 async def delete_watch(watch_id: int):
@@ -185,7 +201,6 @@ async def clear_watchlist(user_id: str):
     return {"status": "svuotata"}
 
 def job_check_prices():
-    # 3. LOCK: Se il job dura più di un minuto, salta il giro invece di accavallarsi e farsi bannare
     if not job_lock.acquire(blocking=False):
         print("⏭️ Job saltato: esecuzione precedente ancora in corso")
         return
@@ -193,55 +208,54 @@ def job_check_prices():
     try:
         print("🔍 Controllo prezzi in corso...")
         cur = conn.cursor()
-        # --- NUOVO: Aggiunto user_id nella SELECT ---
         cur.execute("SELECT id, user_id, url, last_price FROM watchlist")
         rows = cur.fetchall()
-        
+
         if not rows:
             print("📭 Nessuna carta in watchlist")
-            # Tolto il test job vuoto per non spammare Telegram se non c'è nulla
             return
 
         for row in rows:
             watch_id, user_id, url, old_price = row
-            
-            # --- NUOVO: Controlla se l'utente è attivo ---
+
             last_seen = active_users.get(user_id, 0)
-            if time.time() - last_seen > 120: # 120 secondi = 2 minuti
+            if time.time() - last_seen > 120:
                 print(f"😴 Utente offline ({user_id}). Salto aggiornamento per id={watch_id}")
                 continue
 
-            nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
-            
+            nome = url.split("/")[-1].split("?")[0].replace("-", " ")
+
             print(f"🃏 Controllo carta id={watch_id} - {nome}")
             new_price = scrape_price(url)
-            
+
             if new_price is not None:
                 if old_price is None or new_price != old_price:
                     msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
                     send_telegram_message(msg)
-                    
+
                     cur_update = conn.cursor()
                     cur_update.execute("UPDATE watchlist SET last_price=? WHERE id=?", (new_price, watch_id))
                     conn.commit()
                     print(f"✅ Prezzo aggiornato nel DB per {nome}")
                 else:
-                    # NOTIFICA DI TEST
                     msg = f"🧪 TEST JOB OK (App aperta)\n🃏 {nome}\n💶 Prezzo invariato: {new_price}€\n🔗 {url}"
                     send_telegram_message(msg)
                     print(f"ℹ️ Prezzo invariato per {nome}, notifica test inviata")
             else:
-                # NOTIFICA DI TEST FALLITO
                 msg = f"⚠️ TEST JOB FALLITO\n🃏 {nome}\n❌ Prezzo non trovato\n🔗 {url}"
                 send_telegram_message(msg)
                 print(f"⚠️ Bot bloccato su {url}. Mantengo il vecchio prezzo in memoria.")
+
+            attesa_umana = random.uniform(10.0, 20.0)
+            print(f"⏳ Pausa di {attesa_umana:.1f} secondi prima della prossima carta...")
+            time.sleep(attesa_umana)
 
     finally:
         job_lock.release()
 
 def run_scheduler():
-    schedule.every(1).minutes.do(job_check_prices)
-    print("⏰ Scheduler avviato: controllo ogni 1 minuto (solo per utenti con app aperta)")
+    schedule.every(5).minutes.do(job_check_prices)
+    print("⏰ Scheduler avviato: controllo ogni 5 minuti (solo per utenti con app aperta)")
     while True:
         schedule.run_pending()
         time.sleep(10)
