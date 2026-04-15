@@ -32,6 +32,13 @@ cur.execute('''CREATE TABLE IF NOT EXISTS users
 
 cur.execute('''CREATE TABLE IF NOT EXISTS watchlist 
                (id INTEGER PRIMARY KEY, user_id TEXT, url TEXT, last_price REAL, created_at TEXT)''')
+
+# Migrazione: Aggiungo la colonna image_url se non esiste
+try:
+    cur.execute("ALTER TABLE watchlist ADD COLUMN image_url TEXT")
+except sqlite3.OperationalError:
+    pass # Colonna già esistente
+
 conn.commit()
 print("✅ Database inizializzato")
 
@@ -79,7 +86,7 @@ def send_telegram_message(user_id, testo):
         pass
 
 # --- SCRAPING CORE ---
-def scrape_price(url, max_retries=3):
+def scrape_card_data(url, max_retries=3):
     identities = [
         {
             "name": "safari-main",
@@ -110,13 +117,11 @@ def scrape_price(url, max_retries=3):
     for attempt in range(max_retries):
         try:
             identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
-
-            micro_wait = random.uniform(1.2, 3.2)
-            time.sleep(micro_wait)
+            time.sleep(random.uniform(1.2, 3.2))
 
             cache_buster = random.randint(1000000, 9999999)
             separator = "&" if "?" in url else "?"
-            url_busted = f"{url}nocache={cache_buster}"
+            url_busted = f"{url}{separator}nocache={cache_buster}"
 
             response = cffi_requests.get(
                 url_busted,
@@ -130,8 +135,9 @@ def scrape_price(url, max_retries=3):
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
+            
+            # --- Prezzo ---
             prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-
             if not prezzo_tag:
                 tabelle = soup.select("dd.col-6.col-xl-7")
                 for tag in tabelle:
@@ -139,11 +145,25 @@ def scrape_price(url, max_retries=3):
                     if "€" in txt:
                         prezzo_tag = tag
                         break
-
+            
+            price = None
             if prezzo_tag:
-                prezzo = parse_prezzo(prezzo_tag.get_text(strip=True))
-                if prezzo is not None:
-                    return prezzo
+                price = parse_prezzo(prezzo_tag.get_text(strip=True))
+
+            # --- Immagine ---
+            image_url = ""
+            img_meta = soup.find("meta", property="og:image")
+            if img_meta and img_meta.get("content"):
+                image_url = img_meta["content"]
+            else:
+                img_front = soup.select_one("img.is-front")
+                if img_front and img_front.get("src"):
+                    image_url = img_front["src"]
+                    if image_url.startswith("//"):
+                        image_url = "https:" + image_url
+
+            if price is not None:
+                return {"price": price, "image": image_url}
 
         except Exception as e:
             pass
@@ -179,28 +199,27 @@ async def get_settings(user_id: str):
 # --- AGGIUNTA SINGOLA ---
 @app.post("/watch")
 async def add_watch(item: WatchItem):
-    # Usiamo direttamente l'URL inserito dall'utente (così preserva i filtri)
     final_url = item.card_url.strip()
 
     if "cardmarket.com" not in final_url:
         raise HTTPException(status_code=400, detail="URL non valido. Assicurati che sia un link di Cardmarket.")
 
     active_users[item.user_id] = time.time()
-    current_price = scrape_price(final_url)
+    data = scrape_card_data(final_url)
     nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
 
-    if current_price is None:
-        raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo in questo momento. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
+    if not data or data["price"] is None:
+        raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
 
     cur = conn.cursor()
-    cur.execute("INSERT INTO watchlist (user_id, url, last_price, created_at) VALUES (?, ?, ?, ?)",
-                (item.user_id, final_url, current_price, datetime.now().isoformat()))
+    cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                (item.user_id, final_url, data["price"], data["image"], datetime.now().isoformat()))
     conn.commit()
 
-    send_telegram_message(item.user_id, f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {current_price}€")
+    send_telegram_message(item.user_id, f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {data['price']}€")
     time.sleep(random.uniform(2.5, 5.0))
     
-    return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": current_price}
+    return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": data["price"], "image": data["image"]}
 
 # --- IMPORT MASSIVO CON CODA BACKGROUND ---
 def process_mass_import(user_id: str, urls: list[str]):
@@ -210,22 +229,21 @@ def process_mass_import(user_id: str, urls: list[str]):
         if "cardmarket.com" not in final_url:
             continue
             
-        price = scrape_price(final_url)
-        if price is not None:
+        data = scrape_card_data(final_url)
+        if data and data["price"] is not None:
             cur = conn.cursor()
             cur.execute("SELECT id FROM watchlist WHERE user_id=? AND url=?", (user_id, final_url))
             if not cur.fetchone():
-                cur.execute("INSERT INTO watchlist (user_id, url, last_price, created_at) VALUES (?, ?, ?, ?)",
-                            (user_id, final_url, price, datetime.now().isoformat()))
+                cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (user_id, final_url, data["price"], data["image"], datetime.now().isoformat()))
                 conn.commit()
                 success_count += 1
         
-        # Pausa lunga tra le carte per non farsi bannare
         time.sleep(random.uniform(10.0, 18.0))
         
     msg = f"📦 Import completato!\nAggiunte {success_count}/{len(urls)} carte al tracciamento."
     if success_count < len(urls):
-        msg += "\n⚠️ Alcune carte non sono state caricate (possibile blocco temporaneo di sicurezza Cardmarket). Puoi riprovare ad aggiungerle."
+        msg += "\n⚠️ Alcune carte non sono state caricate (possibile blocco di Cardmarket). Riprova."
     send_telegram_message(user_id, msg)
 
 @app.post("/watch/mass")
@@ -237,8 +255,8 @@ async def add_mass_watch(item: MassImportItem, background_tasks: BackgroundTasks
 @app.get("/watchlist/{user_id}")
 async def get_watchlist(user_id: str):
     cur = conn.cursor()
-    cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
-    return [{"id": row[0], "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '), "url": row[1], "last_price": row[2]} for row in cur.fetchall()]
+    cur.execute("SELECT id, url, last_price, image_url FROM watchlist WHERE user_id=? ORDER BY id DESC", (user_id,))
+    return [{"id": row[0], "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '), "url": row[1], "last_price": row[2], "image_url": row[3] or ""} for row in cur.fetchall()]
 
 @app.delete("/watch/{watch_id}")
 async def delete_watch(watch_id: int):
@@ -284,14 +302,16 @@ def job_check_prices():
                 watch_id, url, old_price = card
                 nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
                 
-                new_price = scrape_price(url)
-                if new_price is not None:
+                data = scrape_card_data(url)
+                if data and data["price"] is not None:
+                    new_price = data["price"]
                     if old_price is None or new_price != old_price:
                         msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
                         send_telegram_message(user_id, msg)
                         
                         cur_update = conn.cursor()
-                        cur_update.execute("UPDATE watchlist SET last_price=? WHERE id=?", (new_price, watch_id))
+                        # Aggiorniamo sia prezzo che immagine (in caso mancasse)
+                        cur_update.execute("UPDATE watchlist SET last_price=?, image_url=? WHERE id=?", (new_price, data["image"], watch_id))
                         conn.commit()
 
                 time.sleep(random.uniform(12.0, 22.0))
