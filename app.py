@@ -9,6 +9,7 @@ import time
 import random
 import threading
 import os
+import re
 
 import requests as std_requests
 from curl_cffi import requests as cffi_requests
@@ -140,43 +141,46 @@ def scrape_card_data(url, max_retries=3):
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
+            html_text = response.text
             
-            # --- Immagine ---
-            image_url = ""
-            img_meta = soup.find("meta", property="og:image")
-            if img_meta and img_meta.get("content"):
-                image_url = img_meta["content"]
-            else:
-                img_front = soup.select_one("img.is-front")
-                if img_front and img_front.get("src"):
-                    image_url = img_front["src"]
-                    if image_url.startswith("//"):
-                        image_url = "https:" + image_url
-
-            # --- Prezzo, Condizione, Lingua (dal primo elemento in tabella) ---
             price = None
             condition = "N/A"
             language = "🌐"
+            image_url = ""
 
-            # Cerchiamo la PRIMA riga della tabella offerte (article-row)
+            # 1. ESTRAZIONE IMMAGINE
+            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
+            if img_match:
+                image_url = img_match.group(1)
+                if image_url.startswith("//"): image_url = "https:" + image_url
+            else:
+                img_meta = soup.find("meta", property="og:image")
+                if img_meta and img_meta.get("content"):
+                    image_url = img_meta["content"]
+
+            # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
             first_row = soup.select_one("div.row.article-row")
             if first_row:
-                # Prezzo dalla riga
-                price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold")
-                if not price_tag:
-                    price_tag = first_row.select_one(".font-weight-bold.color-primary")
+                # A. Prezzo
+                price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary")
                 if price_tag:
                     price = parse_prezzo(price_tag.get_text(strip=True))
 
-                # Condizione dalla riga
-                cond_tag = first_row.select_one("span.badge")
+                # B. Condizione
+                cond_tag = first_row.select_one("a.article-condition span.badge")
                 if cond_tag:
                     condition = cond_tag.get_text(strip=True)
 
-                # Lingua dalla riga (tradotta in emoji)
-                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-bs-original-title], span.icon[data-original-title]")
+                # C. Lingua (Estratta dagli attributi icon o onmouseover)
+                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
                 if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-bs-original-title") or lang_tag.get("data-original-title") or ""
+                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
+                    
+                    if not lang_text and lang_tag.get("onmouseover"):
+                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
+                        if match:
+                            lang_text = match.group(1)
+
                     lang_map = {
                         "Inglese": "🇬🇧",
                         "Italiano": "🇮🇹",
@@ -192,10 +196,9 @@ def scrape_card_data(url, max_retries=3):
                         if k.lower() in lang_text.lower():
                             language = v
                             break
-                    if language == "🌐" and lang_text:
-                        language = lang_text[:2].upper()
-            else:
-                # Fallback: leggiamo dal blocco info top-right (nessuna info su cond/lingua qui)
+
+            # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
+            if price is None:
                 prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
                 if not prezzo_tag:
                     tabelle = soup.select("dd.col-6.col-xl-7")
