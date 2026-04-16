@@ -142,75 +142,83 @@ def scrape_card_data(url, max_retries=3):
 
             soup = BeautifulSoup(response.text, "html.parser")
             html_text = response.text
-            
+
             price = None
             condition = "N/A"
             language = "🌐"
             image_url = ""
 
-            # 1. ESTRAZIONE IMMAGINE
-            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
-            if img_match:
-                image_url = img_match.group(1)
-                if image_url.startswith("//"): image_url = "https:" + image_url
+            # --------------------------------------------------------------------------------
+            # 1. ESTRAZIONE IMMAGINE (Ricerca img is-front SENZA classe lazy nello slideshow)
+            # --------------------------------------------------------------------------------
+            # Cerca l'immagine della carta attuale (ignora le slide lazy)
+            active_img = soup.select_one("div.card-slideshow img.is-front:not(.lazy)")
+            
+            # Se per qualche motivo non la trova, prende la prima is-front disponibile
+            if not active_img:
+                active_img = soup.select_one("div.card-slideshow img.is-front")
+                
+            if active_img and active_img.get("src"):
+                image_url = active_img["src"]
+                if image_url.startswith("//"): 
+                    image_url = "https:" + image_url
             else:
-                img_tag = soup.select_one("div.image.card-image img.is-front")
-                if img_tag and img_tag.get("src"):
-                    image_url = img_tag["src"]
-                    if image_url.startswith("//"): image_url = "https:" + image_url
-                else:
-                    img_meta = soup.find("meta", property="og:image")
-                    if img_meta and img_meta.get("content"):
-                        image_url = img_meta["content"]
+                # Fallback di sicurezza con regex se BeautifulSoup fallisce
+                img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front(?![\w\s]*lazy)[^"]*"', html_text)
+                if img_match:
+                    image_url = img_match.group(1)
+                    if image_url.startswith("//"): 
+                        image_url = "https:" + image_url
 
-            # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
+            # --------------------------------------------------------------------------------
+            # 2. ESTRAZIONE TABELLA (PREZZO, CONDIZIONE E LINGUA)
+            # --------------------------------------------------------------------------------
             first_row = soup.select_one("div.row.article-row")
             if first_row:
-                # A. Prezzo
+                # A. Prezzo (Lasciato invariato, funzionava)
                 price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary")
                 if price_tag:
                     price = parse_prezzo(price_tag.get_text(strip=True))
 
-                # B. Condizione 
+                # B. Condizione (Lasciato invariato, funzionava)
                 cond_tag = first_row.select_one("a.article-condition span.badge")
                 if cond_tag:
                     condition = cond_tag.get_text(strip=True)
 
-                # C. Lingua (Estratta e convertita SUBITO in Emoji)
-                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
+                # C. Lingua (Estratta dagli attributi icon o onmouseover della riga corrente)
+                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[data-bs-original-title], span.icon[onmouseover]")
                 if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
-                    
+                    # Controlla in ordine di priorità gli attributi
+                    lang_text = (lang_tag.get("data-original-title") or 
+                                 lang_tag.get("data-bs-original-title") or 
+                                 lang_tag.get("aria-label") or "")
+
+                    # Fallback su onmouseover se gli altri sono vuoti
                     if not lang_text and lang_tag.get("onmouseover"):
-                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
+                        match = re.search(r"showMsgBox\((?:this,)?`([^`]+)`\)", lang_tag.get("onmouseover"))
                         if match:
                             lang_text = match.group(1)
 
                     lang_map = {
-                        "inglese": "🇬🇧",
-                        "italiano": "🇮🇹",
-                        "francese": "🇫🇷",
-                        "tedesco": "🇩🇪",
-                        "spagnolo": "🇪🇸",
-                        "portoghese": "🇵🇹",
-                        "giapponese": "🇯🇵",
-                        "coreano": "🇰🇷",
-                        "cinese": "🇨🇳"
+                        "Inglese": "🇬🇧",
+                        "Italiano": "🇮🇹",
+                        "Francese": "🇫🇷",
+                        "Tedesco": "🇩🇪",
+                        "Spagnolo": "🇪🇸",
+                        "Portoghese": "🇵🇹",
+                        "Giapponese": "🇯🇵",
+                        "Coreano": "🇰🇷",
+                        "Cinese": "🇨🇳"
                     }
                     
-                    if lang_text:
-                        lower_text = lang_text.lower()
-                        language_found = False
-                        for key_lang, emoji_flag in lang_map.items():
-                            if key_lang in lower_text:
-                                language = emoji_flag
-                                language_found = True
-                                break
-                        
-                        if not language_found:
-                            language = lang_text[:2].upper()
+                    for k, v in lang_map.items():
+                        if k.lower() in lang_text.lower():
+                            language = v
+                            break
 
+            # --------------------------------------------------------------------------------
             # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
+            # --------------------------------------------------------------------------------
             if price is None:
                 prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
                 if not prezzo_tag:
