@@ -141,6 +141,7 @@ def scrape_card_data(url, max_retries=3):
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
+            html_text = response.text
             
             price = None
             condition = "N/A"
@@ -148,16 +149,19 @@ def scrape_card_data(url, max_retries=3):
             image_url = ""
 
             # 1. ESTRAZIONE IMMAGINE
-            # Cerca esattamente il tag img con classe is-front
-            img_tag = soup.select_one("img.is-front")
-            if img_tag and img_tag.get("src"):
-                image_url = img_tag["src"]
+            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
+            if img_match:
+                image_url = img_match.group(1)
                 if image_url.startswith("//"): image_url = "https:" + image_url
             else:
-                # Fallback
-                img_meta = soup.find("meta", property="og:image")
-                if img_meta and img_meta.get("content"):
-                    image_url = img_meta["content"]
+                img_tag = soup.select_one("div.image.card-image img.is-front")
+                if img_tag and img_tag.get("src"):
+                    image_url = img_tag["src"]
+                    if image_url.startswith("//"): image_url = "https:" + image_url
+                else:
+                    img_meta = soup.find("meta", property="og:image")
+                    if img_meta and img_meta.get("content"):
+                        image_url = img_meta["content"]
 
             # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
             first_row = soup.select_one("div.row.article-row")
@@ -167,18 +171,17 @@ def scrape_card_data(url, max_retries=3):
                 if price_tag:
                     price = parse_prezzo(price_tag.get_text(strip=True))
 
-                # B. Condizione
-                cond_tag = first_row.select_one("span.badge")
+                # B. Condizione 
+                cond_tag = first_row.select_one("a.article-condition span.badge")
                 if cond_tag:
                     condition = cond_tag.get_text(strip=True)
 
-                # C. Lingua (Estratta dagli attributi icon o onmouseover)
-                lang_tag = first_row.select_one("span.icon")
+                # C. Lingua (Estratta e convertita SUBITO in Emoji)
+                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
                 if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or lang_tag.get("data-bs-original-title") or ""
+                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
                     
                     if not lang_text and lang_tag.get("onmouseover"):
-                        import re
                         match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
                         if match:
                             lang_text = match.group(1)
@@ -195,15 +198,15 @@ def scrape_card_data(url, max_retries=3):
                         "cinese": "🇨🇳"
                     }
                     
-                    # Converte forzatamente la stringa in emoji
                     if lang_text:
+                        lower_text = lang_text.lower()
                         language_found = False
-                        for k, v in lang_map.items():
-                            if k in lang_text.lower():
-                                language = v
+                        for key_lang, emoji_flag in lang_map.items():
+                            if key_lang in lower_text:
+                                language = emoji_flag
                                 language_found = True
                                 break
-                        # Se proprio non trova l'emoji, stampa le prime due lettere
+                        
                         if not language_found:
                             language = lang_text[:2].upper()
 
@@ -228,7 +231,6 @@ def scrape_card_data(url, max_retries=3):
         time.sleep(random.uniform(4.5, 8.5))
 
     return None
-# --- ENDPOINTS ---
 @app.get("/ping/{user_id}")
 async def ping_user(user_id: str):
     active_users[user_id] = time.time()
