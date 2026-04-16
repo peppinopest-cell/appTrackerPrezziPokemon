@@ -168,39 +168,46 @@ def scrape_card_data(url, max_retries=3):
                 if cond_tag:
                     condition = cond_tag.get_text(strip=True)
             
-            # --- C. Lingua (Nuova ricerca icona/tooltip) ---
-            lang_map = {
-                'inglese': '🇬🇧', 'english': '🇬🇧', 'en': '🇬🇧', 'gb': '🇬🇧', 'uk': '🇬🇧',
-                'italiano': '🇮🇹', 'italian': '🇮🇹', 'it': '🇮🇹',
-                'francese': '🇫🇷', 'french': '🇫🇷', 'fr': '🇫🇷',
-                'tedesco': '🇩🇪', 'german': '🇩🇪', 'de': '🇩🇪',
-                'spagnolo': '🇪🇸', 'spanish': '🇪🇸', 'es': '🇪🇸',
-                'portoghese': '🇵🇹', 'portuguese': '🇵🇹', 'pt': '🇵🇹',
-                'giapponese': '🇯🇵', 'japanese': '🇯🇵', 'jp': '🇯🇵',
-                'coreano': '🇰🇷', 'korean': '🇰🇷', 'kr': '🇰🇷',
-                'cinese': '🇨🇳', 'chinese': '🇨🇳', 'cn': '🇨🇳'
-            }
+            # --- C. LINGUA (Lettura infallibile dall'HTML) ---
+            language = ""
+            lang_text = ""
             
-            lang_icons = soup.select('.product-attributes span.icon, .article-row span.icon, .icon-lang')
-            for icon in lang_icons:
-                title = icon.get('data-bs-original-title') or icon.get('title') or icon.get('aria-label') or ""
-                title_lower = title.lower().strip()
+            # 1. Cerchiamo esattamente i tag che mi hai mostrato nell'HTML della prima riga
+            if first_row:
+                row_html = str(first_row)
+                m = re.search(r'(?:aria-label|data-bs-original-title|data-original-title)="([^"]+)"', row_html)
+                if not m:
+                    # Se non trova l'attributo, cerca dentro la funzione showMsgBox con i backtick `
+                    m = re.search(r'showMsgBox\(this,`([^`]+)`\)', row_html)
+                if m:
+                    lang_text = m.group(1).lower().strip()
+            
+            # 2. Se per qualche motivo assurdo non è nella riga, lo cerca ovunque nell'HTML
+            if not lang_text:
+                m_all = re.search(r'<span[^>]*?(?:aria-label|data-bs-original-title)="([^"]+)"[^>]*?class="icon[^"]*"', html_text)
+                if not m_all:
+                    m_all = re.search(r'showMsgBox\(this,`([^`]+)`\)', html_text)
+                if m_all:
+                    lang_text = m_all.group(1).lower().strip()
+
+            # Trascodifica del testo estratto (es. "francese") nell'emoji della bandiera
+            if lang_text:
+                lang_map = {
+                    'inglese': '🇬🇧', 'english': '🇬🇧', 
+                    'italiano': '🇮🇹', 'italian': '🇮🇹', 
+                    'francese': '🇫🇷', 'french': '🇫🇷', 
+                    'tedesco': '🇩🇪', 'german': '🇩🇪', 
+                    'spagnolo': '🇪🇸', 'spanish': '🇪🇸', 
+                    'portoghese': '🇵🇹', 'portuguese': '🇵🇹', 
+                    'giapponese': '🇯🇵', 'japanese': '🇯🇵', 
+                    'coreano': '🇰🇷', 'korean': '🇰🇷', 
+                    'cinese': '🇨🇳', 'chinese': '🇨🇳'
+                }
                 
-                for key, emoji in lang_map.items():
-                    if key in title_lower:
+                for k, emoji in lang_map.items():
+                    if k in lang_text:
                         language = emoji
                         break
-                if language:
-                    break
-                    
-            if not language:
-                attr_container = soup.select_one('.product-attributes')
-                if attr_container:
-                    raw_text = attr_container.get_text(separator=" ", strip=True).lower()
-                    for key, emoji in lang_map.items():
-                        if f" {key} " in f" {raw_text} " or key == raw_text:
-                            language = emoji
-                            break
             
             # --- Prezzo Fallback ---
             if price is None:
