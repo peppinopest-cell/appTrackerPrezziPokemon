@@ -141,7 +141,6 @@ def scrape_card_data(url, max_retries=3):
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
-            html_text = response.text
             
             price = None
             condition = "N/A"
@@ -149,11 +148,13 @@ def scrape_card_data(url, max_retries=3):
             image_url = ""
 
             # 1. ESTRAZIONE IMMAGINE
-            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
-            if img_match:
-                image_url = img_match.group(1)
+            # Cerca esattamente il tag img con classe is-front
+            img_tag = soup.select_one("img.is-front")
+            if img_tag and img_tag.get("src"):
+                image_url = img_tag["src"]
                 if image_url.startswith("//"): image_url = "https:" + image_url
             else:
+                # Fallback
                 img_meta = soup.find("meta", property="og:image")
                 if img_meta and img_meta.get("content"):
                     image_url = img_meta["content"]
@@ -167,35 +168,44 @@ def scrape_card_data(url, max_retries=3):
                     price = parse_prezzo(price_tag.get_text(strip=True))
 
                 # B. Condizione
-                cond_tag = first_row.select_one("a.article-condition span.badge")
+                cond_tag = first_row.select_one("span.badge")
                 if cond_tag:
                     condition = cond_tag.get_text(strip=True)
 
                 # C. Lingua (Estratta dagli attributi icon o onmouseover)
-                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
+                lang_tag = first_row.select_one("span.icon")
                 if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
+                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or lang_tag.get("data-bs-original-title") or ""
                     
                     if not lang_text and lang_tag.get("onmouseover"):
+                        import re
                         match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
                         if match:
                             lang_text = match.group(1)
 
                     lang_map = {
-                        "Inglese": "🇬🇧",
-                        "Italiano": "🇮🇹",
-                        "Francese": "🇫🇷",
-                        "Tedesco": "🇩🇪",
-                        "Spagnolo": "🇪🇸",
-                        "Portoghese": "🇵🇹",
-                        "Giapponese": "🇯🇵",
-                        "Coreano": "🇰🇷",
-                        "Cinese": "🇨🇳"
+                        "inglese": "🇬🇧",
+                        "italiano": "🇮🇹",
+                        "francese": "🇫🇷",
+                        "tedesco": "🇩🇪",
+                        "spagnolo": "🇪🇸",
+                        "portoghese": "🇵🇹",
+                        "giapponese": "🇯🇵",
+                        "coreano": "🇰🇷",
+                        "cinese": "🇨🇳"
                     }
-                    for k, v in lang_map.items():
-                        if k.lower() in lang_text.lower():
-                            language = v
-                            break
+                    
+                    # Converte forzatamente la stringa in emoji
+                    if lang_text:
+                        language_found = False
+                        for k, v in lang_map.items():
+                            if k in lang_text.lower():
+                                language = v
+                                language_found = True
+                                break
+                        # Se proprio non trova l'emoji, stampa le prime due lettere
+                        if not language_found:
+                            language = lang_text[:2].upper()
 
             # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
             if price is None:
@@ -218,7 +228,6 @@ def scrape_card_data(url, max_retries=3):
         time.sleep(random.uniform(4.5, 8.5))
 
     return None
-
 # --- ENDPOINTS ---
 @app.get("/ping/{user_id}")
 async def ping_user(user_id: str):
