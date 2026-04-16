@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
+from fastapi.responses import Response
 import sqlite3
 from datetime import datetime
 import schedule
@@ -345,6 +346,30 @@ async def clear_watchlist(user_id: str):
     cur.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
     conn.commit()
     return {"status": "svuotata"}
+
+@app.get("/proxy-image")
+async def proxy_image(url: str):
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="URL non valido")
+    
+    # Facciamo finta di essere un browser normale su Cardmarket
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.cardmarket.com/",
+        "Origin": "https://www.cardmarket.com"
+    }
+    
+    try:
+        # Scarichiamo l'immagine dal server di Cardmarket
+        img_resp = std_requests.get(url, headers=headers, timeout=10)
+        
+        # Se ha successo, la restituiamo direttamente al frontend come se fossimo noi il server dell'immagine!
+        if img_resp.status_code == 200:
+            return Response(content=img_resp.content, media_type=img_resp.headers.get("Content-Type", "image/jpeg"))
+        else:
+            raise HTTPException(status_code=img_resp.status_code, detail="Impossibile scaricare l'immagine")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- JOB SCHEDULATO CON INTERVALLO UTENTE ---
 def job_check_prices():
