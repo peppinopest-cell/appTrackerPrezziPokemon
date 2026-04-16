@@ -148,21 +148,28 @@ def scrape_card_data(url, max_retries=3):
             language = "🌐"
             image_url = ""
 
-            # --- 1. ESTRAZIONE IMMAGINE ---
+                       # --- 1. ESTRAZIONE IMMAGINE (Nuovo metodo Anti-Blocco) ---
             image_url = ""
             
-            # 1. Metodo primario: l'immagine ufficiale usata da Cardmarket per i social (og:image)
+            # Tentativo 1: Il tag meta ufficiale og:image per i social network (il più affidabile)
             img_meta = soup.find('meta', property='og:image')
             if img_meta and img_meta.get('content'):
                 image_url = img_meta['content']
                 
-            # 2. Fallback di sicurezza: l'immagine nella pagina
+            # Tentativo 2: Cerca qualsiasi immagine dentro il contenitore principale della carta
             if not image_url:
-                img_tag = soup.select_one('.product-image img, img.is-front, .image-container img')
-                if img_tag and img_tag.get('src'):
-                    image_url = img_tag['src']
-            
-            # Normalizziamo il link nel caso Cardmarket ometta l'https://
+                img_tag = soup.select_one('.image-container img, .product-image img, .card-image img')
+                if img_tag:
+                    # Alcuni siti usano data-src per il caricamento pigro, altri src
+                    image_url = img_tag.get('src') or img_tag.get('data-src') or ""
+                    
+            # Tentativo 3: Regex drastica per trovare qualunque cosa finisca con .jpg o .png e abbia "img/" e "Products"
+            if not image_url:
+                match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
+                if match:
+                    image_url = match.group(0)
+
+            # Normalizzazione (Se manca https:)
             if image_url.startswith("//"):
                 image_url = "https:" + image_url
             elif image_url.startswith("/"):
