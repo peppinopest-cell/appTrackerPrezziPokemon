@@ -148,15 +148,25 @@ def scrape_card_data(url, max_retries=3):
             language = "🌐"
             image_url = ""
 
-            # 1. ESTRAZIONE IMMAGINE
-            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
-            if img_match:
-                image_url = img_match.group(1)
-                if image_url.startswith("//"): image_url = "https:" + image_url
-            else:
-                img_meta = soup.find("meta", property="og:image")
-                if img_meta and img_meta.get("content"):
-                    image_url = img_meta["content"]
+            # --- 1. ESTRAZIONE IMMAGINE ---
+            image_url = ""
+            
+            # 1. Metodo primario: l'immagine ufficiale usata da Cardmarket per i social (og:image)
+            img_meta = soup.find('meta', property='og:image')
+            if img_meta and img_meta.get('content'):
+                image_url = img_meta['content']
+                
+            # 2. Fallback di sicurezza: l'immagine nella pagina
+            if not image_url:
+                img_tag = soup.select_one('.product-image img, img.is-front, .image-container img')
+                if img_tag and img_tag.get('src'):
+                    image_url = img_tag['src']
+            
+            # Normalizziamo il link nel caso Cardmarket ometta l'https://
+            if image_url.startswith("//"):
+                image_url = "https:" + image_url
+            elif image_url.startswith("/"):
+                image_url = "https://www.cardmarket.com" + image_url
 
             # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
             first_row = soup.select_one("div.row.article-row")
