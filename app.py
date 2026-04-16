@@ -9,67 +9,43 @@ import time
 import random
 import threading
 import os
-import re
+
 import requests as std_requests
 from curl_cffi import requests as cffi_requests
 
-app = FastAPI(title="Poké Price Bot API")
-
+app = FastAPI(title="🔴 Poké Price Bot API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
 DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    bot_token TEXT,
-    chat_id TEXT,
-    check_interval INTEGER DEFAULT 5,
-    created_at TEXT
-)
-""")
+# Creazione tabelle aggiornate
+cur.execute('''CREATE TABLE IF NOT EXISTS users
+               (id TEXT PRIMARY KEY, bot_token TEXT, chat_id TEXT, check_interval INTEGER DEFAULT 5, created_at TEXT)''')
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS watchlist (
-    id INTEGER PRIMARY KEY,
-    user_id TEXT,
-    url TEXT,
-    last_price REAL,
-    created_at TEXT
-)
-""")
+cur.execute('''CREATE TABLE IF NOT EXISTS watchlist 
+               (id INTEGER PRIMARY KEY, user_id TEXT, url TEXT, last_price REAL, created_at TEXT)''')
 
-# --- Migrazione: Aggiungo colonne immagine, condizione, lingua se mancano ---
+# Migrazione: Aggiungo la colonna image_url se non esiste
 try:
     cur.execute("ALTER TABLE watchlist ADD COLUMN image_url TEXT")
-except:
-    pass
-
-try:
-    cur.execute("ALTER TABLE watchlist ADD COLUMN condition TEXT")
-except:
-    pass
-
-try:
-    cur.execute("ALTER TABLE watchlist ADD COLUMN language TEXT")
-except:
-    pass
+except sqlite3.OperationalError:
+    pass # Colonna già esistente
 
 conn.commit()
-print("Database inizializzato")
+print("✅ Database inizializzato")
 
 job_lock = threading.Lock()
 active_users = {}
 
-
+# Pydantic Models
 class UserSettings(BaseModel):
     user_id: str
     bot_token: str
@@ -84,12 +60,12 @@ class MassImportItem(BaseModel):
     user_id: str
     urls: list[str]
 
-
+# --- FUNZIONI DI UTILITA' ---
 def parse_prezzo(prezzo_str):
     if not prezzo_str or prezzo_str == "N/D":
         return None
     try:
-        pulito = prezzo_str.replace("€", "").replace(" ", "").replace(".", "").replace(",", ".").strip()
+        pulito = prezzo_str.replace("€", "").replace(".", "").replace(",", ".").strip()
         return float(pulito)
     except:
         return None
@@ -106,127 +82,97 @@ def send_telegram_message(user_id, testo):
     payload = {"chat_id": chat_id, "text": testo}
     try:
         std_requests.post(url, json=payload, timeout=10)
-    except:
+    except Exception as e:
         pass
 
-
+# --- SCRAPING CORE ---
 def scrape_card_data(url, max_retries=3):
     identities = [
-        {"name": "safari-main", "impersonate": "safari15_5", "headers": {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7", "Accept-Encoding": "gzip, deflate, br, zstd", "Upgrade-Insecure-Requests": "1", "Cache-Control": "max-age=0", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"}},
-        {"name": "chrome-fallback", "impersonate": "chrome120", "headers": {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7", "Accept-Encoding": "gzip, deflate, br, zstd", "Upgrade-Insecure-Requests": "1", "Cache-Control": "max-age=0", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}}
+        {
+            "name": "safari-main",
+            "impersonate": "safari15_5",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+            }
+        },
+        {
+            "name": "chrome-fallback",
+            "impersonate": "chrome120",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        }
     ]
-    
+
     for attempt in range(max_retries):
         try:
             identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
             time.sleep(random.uniform(1.2, 3.2))
-            
+
             cache_buster = random.randint(1000000, 9999999)
             separator = "&" if "?" in url else "?"
             url_busted = f"{url}{separator}nocache={cache_buster}"
-            
+
             response = cffi_requests.get(
                 url_busted,
                 impersonate=identity["impersonate"],
                 headers=identity["headers"],
                 timeout=18
             )
-            
+
             if response.status_code == 403:
                 time.sleep(random.uniform(4.0, 7.0))
                 continue
-                
-            soup = BeautifulSoup(response.text, 'html.parser')
-            html_text = response.text
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # --- Prezzo ---
+            prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+            if not prezzo_tag:
+                tabelle = soup.select("dd.col-6.col-xl-7")
+                for tag in tabelle:
+                    txt = tag.get_text(" ", strip=True)
+                    if "€" in txt:
+                        prezzo_tag = tag
+                        break
             
             price = None
-            condition = "N/A"
-            language = ""
-            image_url = ""
-            
+            if prezzo_tag:
+                price = parse_prezzo(prezzo_tag.get_text(strip=True))
+
             # --- Immagine ---
-            img_match = re.search(r'<img[^>]*src="([^"]+)"[^>]*class="is-front"', html_text)
-            if img_match:
-                image_url = img_match.group(1)
+            image_url = ""
+            img_meta = soup.find("meta", property="og:image")
+            if img_meta and img_meta.get("content"):
+                image_url = img_meta["content"]
             else:
-                img_tag = soup.select_one("img.is-front")
-                if img_tag and img_tag.get("src"):
-                    image_url = img_tag["src"]
-            
-            if image_url.startswith("//"):
-                image_url = "https:" + image_url
-                
-            first_row = soup.select_one('div.row.article-row')
-            if first_row:
-                # --- Prezzo ---
-                price_tag = first_row.select_one('.price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary')
-                if price_tag:
-                    price = parse_prezzo(price_tag.get_text(strip=True))
-                
-                # --- Condizione ---
-                cond_tag = first_row.select_one('a.article-condition span.badge')
-                if cond_tag:
-                    condition = cond_tag.get_text(strip=True)
-            
-            # --- C. LINGUA (Ricerca strutturata e infallibile) ---
-            language = ""
-            lang_map = {
-                'inglese': '🇬🇧', 'english': '🇬🇧', 
-                'italiano': '🇮🇹', 'italian': '🇮🇹', 
-                'francese': '🇫🇷', 'french': '🇫🇷', 
-                'tedesco': '🇩🇪', 'german': '🇩🇪', 
-                'spagnolo': '🇪🇸', 'spanish': '🇪🇸', 
-                'portoghese': '🇵🇹', 'portuguese': '🇵🇹', 
-                'giapponese': '🇯🇵', 'japanese': '🇯🇵', 
-                'coreano': '🇰🇷', 'korean': '🇰🇷', 
-                'cinese': '🇨🇳', 'chinese': '🇨🇳'
-            }
-            
-            # Cerca TUTTI gli span con la classe 'icon' (incluso 'icon me-2')
-            for icon in soup.select('span.icon'):
-                # 1. Prende l'attributo, in qualunque ordine si trovi
-                val = icon.get('aria-label') or icon.get('data-bs-original-title') or icon.get('data-original-title') or ""
-                
-                # 2. Cerca persino dentro la funzione Javascript showMsgBox
-                onmo = icon.get('onmouseover', '')
-                m = re.search(r'showMsgBox\(this,\s*[`\']([^`\']+)[`\']\)', onmo)
-                if m:
-                    val = m.group(1)
-                    
-                val_lower = val.lower().strip()
-                
-                # 3. Se il valore trovato (es. "francese") è nella nostra mappa, assegna l'emoji e si ferma!
-                for k, emoji in lang_map.items():
-                    if k in val_lower:
-                        language = emoji
-                        break
-                
-                # Appena trova un'emoji valida si interrompe
-                if language:
-                    break
-            
-            # --- Prezzo Fallback ---
-            if price is None:
-                prezzo_tag = soup.select_one('span.color-primary.small.text-end.text-nowrap.fw-bold')
-                if not prezzo_tag:
-                    tabelle = soup.select('dd.col-6.col-xl-7')
-                    for tag in tabelle:
-                        if '€' in tag.get_text(" ", strip=True):
-                            prezzo_tag = tag
-                            break
-                if prezzo_tag:
-                    price = parse_prezzo(prezzo_tag.get_text(strip=True))
-                    
+                img_front = soup.select_one("img.is-front")
+                if img_front and img_front.get("src"):
+                    image_url = img_front["src"]
+                    if image_url.startswith("//"):
+                        image_url = "https:" + image_url
+
             if price is not None:
-                return {"price": price, "image": image_url, "condition": condition, "language": language}
-                
+                return {"price": price, "image": image_url}
+
         except Exception as e:
             pass
-            
+
         time.sleep(random.uniform(4.5, 8.5))
-    
+
     return None
 
+# --- ENDPOINTS ---
 @app.get("/ping/{user_id}")
 async def ping_user(user_id: str):
     active_users[user_id] = time.time()
@@ -235,12 +181,10 @@ async def ping_user(user_id: str):
 @app.post("/users/settings")
 async def save_settings(settings: UserSettings):
     cur = conn.cursor()
-    cur.execute("""
-        INSERT OR REPLACE INTO users (id, bot_token, chat_id, check_interval, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (settings.user_id, settings.bot_token, settings.chat_id, settings.check_interval, datetime.now().isoformat()))
+    cur.execute("INSERT OR REPLACE INTO users (id, bot_token, chat_id, check_interval, created_at) VALUES (?, ?, ?, ?, ?)",
+                (settings.user_id, settings.bot_token, settings.chat_id, settings.check_interval, datetime.now().isoformat()))
     conn.commit()
-    send_telegram_message(settings.user_id, "Poké Price Bot: Impostazioni salvate correttamente! Inizierò a tracciare le tue carte.")
+    send_telegram_message(settings.user_id, "🔴 Poké Price Bot: Impostazioni salvate correttamente! Inizierò a tracciare le tue carte.")
     return {"status": "saved"}
 
 @app.get("/users/{user_id}/settings")
@@ -252,38 +196,32 @@ async def get_settings(user_id: str):
         return {"bot_token": row[0], "chat_id": row[1], "check_interval": row[2]}
     return {"bot_token": "", "chat_id": "", "check_interval": 5}
 
+# --- AGGIUNTA SINGOLA ---
 @app.post("/watch")
-async def add_watch_item(item: WatchItem):
+async def add_watch(item: WatchItem):
     final_url = item.card_url.strip()
+
     if "cardmarket.com" not in final_url:
         raise HTTPException(status_code=400, detail="URL non valido. Assicurati che sia un link di Cardmarket.")
-    
+
     active_users[item.user_id] = time.time()
     data = scrape_card_data(final_url)
     nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
-    
+
     if not data or data["price"] is None:
         raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
-        
+
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO watchlist (user_id, url, last_price, image_url, condition, language, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (item.user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", ""), datetime.now().isoformat()))
+    cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                (item.user_id, final_url, data["price"], data["image"], datetime.now().isoformat()))
     conn.commit()
-    
-    send_telegram_message(item.user_id, f"✅ {nome} aggiunta!\n{data.get('language', '')} | {data.get('condition', 'N/A')}\nPrezzo iniziale: €{data['price']}")
+
+    send_telegram_message(item.user_id, f"✅ {nome} aggiunta!\n💰 Prezzo iniziale: {data['price']}€")
     time.sleep(random.uniform(2.5, 5.0))
     
-    return {
-        "status": "aggiunta", 
-        "id": cur.lastrowid, 
-        "prezzo": data["price"],
-        "image": data["image"],
-        "condition": data.get("condition"),
-        "language": data.get("language")
-    }
+    return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": data["price"], "image": data["image"]}
 
+# --- IMPORT MASSIVO CON CODA BACKGROUND ---
 def process_mass_import(user_id: str, urls: list[str]):
     success_count = 0
     for url in urls:
@@ -296,21 +234,20 @@ def process_mass_import(user_id: str, urls: list[str]):
             cur = conn.cursor()
             cur.execute("SELECT id FROM watchlist WHERE user_id=? AND url=?", (user_id, final_url))
             if not cur.fetchone():
-                cur.execute("""
-                    INSERT INTO watchlist (user_id, url, last_price, image_url, condition, language, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", ""), datetime.now().isoformat()))
+                cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (user_id, final_url, data["price"], data["image"], datetime.now().isoformat()))
                 conn.commit()
                 success_count += 1
-            time.sleep(random.uniform(10.0, 18.0))
-            
-    msg = f"📦 Import completato! {success_count}/{len(urls)} carte al tracciamento."
+        
+        time.sleep(random.uniform(10.0, 18.0))
+        
+    msg = f"📦 Import completato!\nAggiunte {success_count}/{len(urls)} carte al tracciamento."
     if success_count < len(urls):
-        msg += "\nAlcune carte non sono state caricate (possibile blocco di Cardmarket). Riprova."
+        msg += "\n⚠️ Alcune carte non sono state caricate (possibile blocco di Cardmarket). Riprova."
     send_telegram_message(user_id, msg)
 
 @app.post("/watch/mass")
-async def add_mass_watch_item(item: MassImportItem, background_tasks: BackgroundTasks):
+async def add_mass_watch(item: MassImportItem, background_tasks: BackgroundTasks):
     active_users[item.user_id] = time.time()
     background_tasks.add_task(process_mass_import, item.user_id, item.urls)
     return {"status": "processing", "message": f"Importazione di {len(item.urls)} carte avviata. Riceverai un messaggio su Telegram al termine!"}
@@ -318,18 +255,8 @@ async def add_mass_watch_item(item: MassImportItem, background_tasks: Background
 @app.get("/watchlist/{user_id}")
 async def get_watchlist(user_id: str):
     cur = conn.cursor()
-    cur.execute("SELECT id, url, last_price, image_url, condition, language FROM watchlist WHERE user_id=? ORDER BY id DESC", (user_id,))
-    return [
-        {
-            "id": row[0], 
-            "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '),
-            "url": row[1], 
-            "last_price": row[2],
-            "image_url": row[3] or "",
-            "condition": row[4] or "N/A",
-            "language": row[5] or ""
-        } for row in cur.fetchall()
-    ]
+    cur.execute("SELECT id, url, last_price, image_url FROM watchlist WHERE user_id=? ORDER BY id DESC", (user_id,))
+    return [{"id": row[0], "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '), "url": row[1], "last_price": row[2], "image_url": row[3] or ""} for row in cur.fetchall()]
 
 @app.delete("/watch/{watch_id}")
 async def delete_watch(watch_id: int):
@@ -345,16 +272,18 @@ async def clear_watchlist(user_id: str):
     conn.commit()
     return {"status": "svuotata"}
 
+# --- JOB SCHEDULATO CON INTERVALLO UTENTE ---
 def job_check_prices():
     if not job_lock.acquire(blocking=False):
         return
-        
+
     try:
         cur = conn.cursor()
         cur.execute("SELECT id, check_interval FROM users")
         users = cur.fetchall()
         
         current_minute = datetime.now().minute
+        
         for user_row in users:
             user_id = user_row[0]
             interval = user_row[1] or 5
@@ -364,7 +293,7 @@ def job_check_prices():
                 
             last_seen = active_users.get(user_id, 0)
             if time.time() - last_seen > 120:
-                continue
+                continue 
                 
             cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
             cards = cur.fetchall()
@@ -377,18 +306,16 @@ def job_check_prices():
                 if data and data["price"] is not None:
                     new_price = data["price"]
                     if old_price is None or new_price != old_price:
-                        msg = f"🚨 AGGIORNAMENTO PREZZO!\n{nome}\n{data.get('language', '')} | {data.get('condition', 'N/A')}\nNuovo prezzo: €{new_price} (era €{old_price})\n{url}"
+                        msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
                         send_telegram_message(user_id, msg)
                         
                         cur_update = conn.cursor()
-                        cur_update.execute("""
-                            UPDATE watchlist 
-                            SET last_price=?, image_url=?, condition=?, language=? 
-                            WHERE id=?
-                        """, (new_price, data["image"], data.get("condition", "N/A"), data.get("language", ""), watch_id))
+                        # Aggiorniamo sia prezzo che immagine (in caso mancasse)
+                        cur_update.execute("UPDATE watchlist SET last_price=?, image_url=? WHERE id=?", (new_price, data["image"], watch_id))
                         conn.commit()
-                        
+
                 time.sleep(random.uniform(12.0, 22.0))
+
     finally:
         job_lock.release()
 
