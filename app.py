@@ -585,10 +585,6 @@ def job_check_prices():
             if current_minute % interval != 0:
                 continue
                 
-            last_seen = active_users.get(user_id, 0)
-            if time.time() - last_seen > 120:
-                continue 
-                
             cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
             cards = cur.fetchall()
             
