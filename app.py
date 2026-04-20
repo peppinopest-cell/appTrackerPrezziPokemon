@@ -3,8 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from fastapi.responses import Response
-import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from curl_cffi import requests as cffi_requests
+import sqlite3
 import schedule
 import time
 import random
@@ -15,9 +17,8 @@ import uuid
 import hashlib
 import secrets
 import hmac
-
 import requests as std_requests
-from curl_cffi import requests as cffi_requests
+
 
 app = FastAPI(title="🔴 Poké Price Bot API")
 app.add_middleware(
@@ -573,38 +574,71 @@ def job_check_prices():
 
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, check_interval FROM users")
-        users = cur.fetchall()
-        
         current_minute = datetime.now().minute
         
-        for user_row in users:
+        # 1. Trova QUALI utenti devono essere controllati in questo minuto esatto
+        cur.execute("SELECT id, check_interval FROM users")
+        users_to_check = []
+        for user_row in cur.fetchall():
             user_id = user_row[0]
             interval = user_row[1] or 5
             
-            if current_minute % interval != 0:
-                continue
+            # Se è il momento giusto per questo utente, lo aggiungo alla lista
+            if current_minute % interval == 0:
+                users_to_check.append(user_id)
                 
-            cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
-            cards = cur.fetchall()
-            
-            for card in cards:
-                watch_id, url, old_price = card
-                nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
-                
-                data = scrape_card_data(url)
-                if data and data["price"] is not None:
-                    new_price = data["price"]
-                    if old_price is None or new_price != old_price:
-                        msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n🗣️ {data.get('language', '🌐')} | 🏷️ {data.get('condition', 'N/A')}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
-                        send_telegram_message(user_id, msg)
-                        
-                        cur_update = conn.cursor()
-                        cur_update.execute("UPDATE watchlist SET last_price=?, image_url=?, condition=?, language=? WHERE id=?", 
-                                           (new_price, data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), watch_id))
-                        conn.commit()
+        if not users_to_check:
+            return # Nessun utente da controllare a questo giro
 
-                time.sleep(random.uniform(12.0, 22.0))
+        # 2. Raccogli TUTTE le carte degli utenti da controllare
+        # Creiamo i placeholder (?,?,?) in base a quanti utenti abbiamo
+        placeholders = ','.join(['?'] * len(users_to_check))
+        cur.execute(f"SELECT id, user_id, url, last_price FROM watchlist WHERE user_id IN ({placeholders})", users_to_check)
+        all_cards = cur.fetchall()
+
+        if not all_cards:
+            return
+
+        # 3. DEDUPLICAZIONE: Trovo solo gli URL unici! 
+        # Se 5 utenti tracciano la stessa carta, la cerco 1 volta sola.
+        unique_urls = list(set(card[2] for card in all_cards))
+        
+        scraped_data = {}
+
+        # Funzione helper per il multithreading
+        def fetch_url(url):
+            # scrape_card_data contiene già i tuoi time.sleep() random per evitare blocchi
+            return url, scrape_card_data(url)
+
+        # 4. MULTITHREADING: Apro 3 "corsie" parallele (max_workers=3)
+        # 3 è un numero sicuro per non far arrabbiare Cloudflare su un IP gratuito
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = executor.map(fetch_url, unique_urls)
+            for url, data in results:
+                scraped_data[url] = data # Salvo il risultato in un dizionario
+
+        # 5. AGGIORNO IL DB E MANDO NOTIFICHE
+        for card in all_cards:
+            watch_id, user_id, url, old_price = card
+            
+            # Prendo i dati freschi dal dizionario (scaricati 1 volta sola per URL)
+            data = scraped_data.get(url)
+            
+            if data and data["price"] is not None:
+                new_price = data["price"]
+                
+                # Se il prezzo è cambiato (o è la prima volta)
+                if old_price is None or new_price != old_price:
+                    nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
+                    msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n🗣️ {data.get('language', '🌐')} | 🏷️ {data.get('condition', 'N/A')}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
+                    send_telegram_message(user_id, msg)
+                    
+                    cur_update = conn.cursor()
+                    cur_update.execute("UPDATE watchlist SET last_price=?, image_url=?, condition=?, language=? WHERE id=?", 
+                                       (new_price, data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), watch_id))
+        
+        # Salvo tutti i cambiamenti nel database in un colpo solo
+        conn.commit()
 
     finally:
         job_lock.release()
