@@ -71,6 +71,7 @@ conn.commit()
 print("✅ Database inizializzato")
 
 job_lock = threading.Lock()
+scrape_semaphore = threading.Semaphore(3) # <--- AGGIUNGI QUESTO: Massimo 3 
 active_users = {}
 
 # Pydantic Models
@@ -160,6 +161,7 @@ def send_telegram_message(user_id, testo):
 
 # --- SCRAPING CORE ---
 def scrape_card_data(url, max_retries=3):
+     with scrape_semaphore:
     identities = [
         {
             "name": "safari-main",
