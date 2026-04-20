@@ -161,149 +161,149 @@ def send_telegram_message(user_id, testo):
 
 # --- SCRAPING CORE ---
 def scrape_card_data(url, max_retries=3):
-     with scrape_semaphore:
-    identities = [
-        {
-            "name": "safari-main",
-            "impersonate": "safari15_5",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "max-age=0",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+    with scrape_semaphore:
+        identities = [
+            {
+                "name": "safari-main",
+                "impersonate": "safari15_5",
+                "headers": {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept-Encoding": "gzip, deflate, br, zstd",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Cache-Control": "max-age=0",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+                }
+            },
+            {
+                "name": "chrome-fallback",
+                "impersonate": "chrome120",
+                "headers": {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept-Encoding": "gzip, deflate, br, zstd",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Cache-Control": "max-age=0",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
             }
-        },
-        {
-            "name": "chrome-fallback",
-            "impersonate": "chrome120",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "max-age=0",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-        }
-    ]
-
-    for attempt in range(max_retries):
-        try:
-            identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
-            time.sleep(random.uniform(1.2, 3.2))
-
-            cache_buster = random.randint(1000000, 9999999)
-            separator = "&" if "?" in url else "?"
-            url_busted = f"{url}{separator}nocache={cache_buster}"
-
-            response = cffi_requests.get(
-                url_busted,
-                impersonate=identity["impersonate"],
-                headers=identity["headers"],
-                timeout=18
-            )
-
-            if response.status_code == 403:
-                time.sleep(random.uniform(4.0, 7.0))
-                continue
-
-            soup = BeautifulSoup(response.text, "html.parser")
-            html_text = response.text
-            
-            price = None
-            condition = "N/A"
-            language = "🌐"
-            image_url = ""
-
-                       # --- 1. ESTRAZIONE IMMAGINE (Nuovo metodo Anti-Blocco) ---
-            image_url = ""
-            
-            # Tentativo 1: Il tag meta ufficiale og:image per i social network (il più affidabile)
-            img_meta = soup.find('meta', property='og:image')
-            if img_meta and img_meta.get('content'):
-                image_url = img_meta['content']
+        ]
+    
+        for attempt in range(max_retries):
+            try:
+                identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
+                time.sleep(random.uniform(1.2, 3.2))
+    
+                cache_buster = random.randint(1000000, 9999999)
+                separator = "&" if "?" in url else "?"
+                url_busted = f"{url}{separator}nocache={cache_buster}"
+    
+                response = cffi_requests.get(
+                    url_busted,
+                    impersonate=identity["impersonate"],
+                    headers=identity["headers"],
+                    timeout=18
+                )
+    
+                if response.status_code == 403:
+                    time.sleep(random.uniform(4.0, 7.0))
+                    continue
+    
+                soup = BeautifulSoup(response.text, "html.parser")
+                html_text = response.text
                 
-            # Tentativo 2: Cerca qualsiasi immagine dentro il contenitore principale della carta
-            if not image_url:
-                img_tag = soup.select_one('.image-container img, .product-image img, .card-image img')
-                if img_tag:
-                    # Alcuni siti usano data-src per il caricamento pigro, altri src
-                    image_url = img_tag.get('src') or img_tag.get('data-src') or ""
+                price = None
+                condition = "N/A"
+                language = "🌐"
+                image_url = ""
+    
+                           # --- 1. ESTRAZIONE IMMAGINE (Nuovo metodo Anti-Blocco) ---
+                image_url = ""
+                
+                # Tentativo 1: Il tag meta ufficiale og:image per i social network (il più affidabile)
+                img_meta = soup.find('meta', property='og:image')
+                if img_meta and img_meta.get('content'):
+                    image_url = img_meta['content']
                     
-            # Tentativo 3: Regex drastica per trovare qualunque cosa finisca con .jpg o .png e abbia "img/" e "Products"
-            if not image_url:
-                match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
-                if match:
-                    image_url = match.group(0)
-
-            # Normalizzazione (Se manca https:)
-            if image_url.startswith("//"):
-                image_url = "https:" + image_url
-            elif image_url.startswith("/"):
-                image_url = "https://www.cardmarket.com" + image_url
-
-            # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
-            first_row = soup.select_one("div.row.article-row")
-            if first_row:
-                # A. Prezzo
-                price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary")
-                if price_tag:
-                    price = parse_prezzo(price_tag.get_text(strip=True))
-
-                # B. Condizione
-                cond_tag = first_row.select_one("a.article-condition span.badge")
-                if cond_tag:
-                    condition = cond_tag.get_text(strip=True)
-
-                # C. Lingua (Estratta dagli attributi icon o onmouseover)
-                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
-                if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
-                    
-                    if not lang_text and lang_tag.get("onmouseover"):
-                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
-                        if match:
-                            lang_text = match.group(1)
-
-                    lang_map = {
-                        "Inglese": "🇬🇧",
-                        "Italiano": "🇮🇹",
-                        "Francese": "🇫🇷",
-                        "Tedesco": "🇩🇪",
-                        "Spagnolo": "🇪🇸",
-                        "Portoghese": "🇵🇹",
-                        "Giapponese": "🇯🇵",
-                        "Coreano": "🇰🇷",
-                        "Cinese": "🇨🇳"
-                    }
-                    for k, v in lang_map.items():
-                        if k.lower() in lang_text.lower():
-                            language = v
-                            break
-
-            # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
-            if price is None:
-                prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-                if not prezzo_tag:
-                    tabelle = soup.select("dd.col-6.col-xl-7")
-                    for tag in tabelle:
-                        if "€" in tag.get_text(" ", strip=True):
-                            prezzo_tag = tag
-                            break
-                if prezzo_tag:
-                    price = parse_prezzo(prezzo_tag.get_text(strip=True))
-
-            if price is not None:
-                return {"price": price, "image": image_url, "condition": condition, "language": language}
-
-        except Exception as e:
-            pass
-
-        time.sleep(random.uniform(4.5, 8.5))
-
-    return None
+                # Tentativo 2: Cerca qualsiasi immagine dentro il contenitore principale della carta
+                if not image_url:
+                    img_tag = soup.select_one('.image-container img, .product-image img, .card-image img')
+                    if img_tag:
+                        # Alcuni siti usano data-src per il caricamento pigro, altri src
+                        image_url = img_tag.get('src') or img_tag.get('data-src') or ""
+                        
+                # Tentativo 3: Regex drastica per trovare qualunque cosa finisca con .jpg o .png e abbia "img/" e "Products"
+                if not image_url:
+                    match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
+                    if match:
+                        image_url = match.group(0)
+    
+                # Normalizzazione (Se manca https:)
+                if image_url.startswith("//"):
+                    image_url = "https:" + image_url
+                elif image_url.startswith("/"):
+                    image_url = "https://www.cardmarket.com" + image_url
+    
+                # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
+                first_row = soup.select_one("div.row.article-row")
+                if first_row:
+                    # A. Prezzo
+                    price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary")
+                    if price_tag:
+                        price = parse_prezzo(price_tag.get_text(strip=True))
+    
+                    # B. Condizione
+                    cond_tag = first_row.select_one("a.article-condition span.badge")
+                    if cond_tag:
+                        condition = cond_tag.get_text(strip=True)
+    
+                    # C. Lingua (Estratta dagli attributi icon o onmouseover)
+                    lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
+                    if lang_tag:
+                        lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
+                        
+                        if not lang_text and lang_tag.get("onmouseover"):
+                            match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
+                            if match:
+                                lang_text = match.group(1)
+    
+                        lang_map = {
+                            "Inglese": "🇬🇧",
+                            "Italiano": "🇮🇹",
+                            "Francese": "🇫🇷",
+                            "Tedesco": "🇩🇪",
+                            "Spagnolo": "🇪🇸",
+                            "Portoghese": "🇵🇹",
+                            "Giapponese": "🇯🇵",
+                            "Coreano": "🇰🇷",
+                            "Cinese": "🇨🇳"
+                        }
+                        for k, v in lang_map.items():
+                            if k.lower() in lang_text.lower():
+                                language = v
+                                break
+    
+                # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
+                if price is None:
+                    prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+                    if not prezzo_tag:
+                        tabelle = soup.select("dd.col-6.col-xl-7")
+                        for tag in tabelle:
+                            if "€" in tag.get_text(" ", strip=True):
+                                prezzo_tag = tag
+                                break
+                    if prezzo_tag:
+                        price = parse_prezzo(prezzo_tag.get_text(strip=True))
+    
+                if price is not None:
+                    return {"price": price, "image": image_url, "condition": condition, "language": language}
+    
+            except Exception as e:
+                pass
+    
+            time.sleep(random.uniform(4.5, 8.5))
+    
+        return None
 
 # --- ENDPOINTS ---
 @app.get("/ping/{user_id}")
