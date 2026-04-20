@@ -11,6 +11,10 @@ import random
 import threading
 import os
 import re
+import uuid
+import hashlib
+import secrets
+import hmac
 
 import requests as std_requests
 from curl_cffi import requests as cffi_requests
@@ -45,6 +49,22 @@ except: pass
 try:
     cur.execute("ALTER TABLE watchlist ADD COLUMN language TEXT")
 except: pass
+try:
+    cur.execute("ALTER TABLE users ADD COLUMN passwordhash TEXT")
+except:
+    pass
+
+try:
+    cur.execute("ALTER TABLE users ADD COLUMN updatedat TEXT")
+except:
+    pass
+
+try:
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_chatid ON users(chatid)")
+except:
+    pass
+
+conn.commit()
 
 conn.commit()
 print("✅ Database inizializzato")
@@ -67,6 +87,51 @@ class MassImportItem(BaseModel):
     user_id: str
     urls: list[str]
 
+class RegisterUserModel(BaseModel):
+    bottoken: str
+    chatid: str
+    password: str
+    checkinterval: int = 5
+
+class LoginUserModel(BaseModel):
+    chatid: str
+    password: str
+    
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        100000
+    ).hex()
+    return f"{salt}${hashed}"
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, old_hash = stored.split("$", 1)
+        new_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            100000
+        ).hex()
+        return hmac.compare_digest(new_hash, old_hash)
+    except:
+        return False
+
+def validate_password(password: str):
+    if len(password) < 8:
+        return "La password deve avere almeno 8 caratteri."
+    if not re.search(r"[A-Z]", password):
+        return "La password deve contenere almeno una lettera maiuscola."
+    if not re.search(r"[a-z]", password):
+        return "La password deve contenere almeno una lettera minuscola."
+    if not re.search(r"[0-9]", password):
+        return "La password deve contenere almeno un numero."
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return "La password deve contenere almeno un carattere speciale."
+    return None
 # --- FUNZIONI DI UTILITA' ---
 def parse_prezzo(prezzo_str):
     if not prezzo_str or prezzo_str == "N/D":
@@ -285,7 +350,102 @@ async def add_watch(item: WatchItem):
     time.sleep(random.uniform(2.5, 5.0))
     
     return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": data["price"], "image": data["image"], "condition": data.get("condition"), "language": data.get("language")}
+@app.post("/auth/register")
+async def register_user(data: RegisterUserModel):
+    bottoken = data.bottoken.strip()
+    chatid = data.chatid.strip()
+    password = data.password.strip()
 
+    if not bottoken or not chatid or not password:
+        raise HTTPException(status_code=400, detail="Bot Token, Chat ID e password sono obbligatori.")
+
+    pwd_error = validate_password(password)
+    if pwd_error:
+        raise HTTPException(status_code=400, detail=pwd_error)
+
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE chatid=?", (chatid,))
+    existing = cur.fetchone()
+    if existing:
+        raise HTTPException(status_code=400, detail="Esiste già un account associato a questo Chat ID.")
+
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    now = datetime.now().isoformat()
+    passwordhash = hash_password(password)
+
+    cur.execute("""
+        INSERT INTO users (id, bottoken, chatid, checkinterval, createdat, passwordhash, updatedat)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        user_id,
+        bottoken,
+        chatid,
+        data.checkinterval,
+        now,
+        passwordhash,
+        now
+    ))
+    conn.commit()
+
+    sendtelegrammessage(user_id, "✅ Account creato correttamente! Il tuo profilo è stato registrato.")
+
+    return {
+        "status": "registered",
+        "userid": user_id,
+        "chatid": chatid,
+        "checkinterval": data.checkinterval
+    }
+
+@app.post("/auth/login")
+async def login_user(data: LoginUserModel):
+    chatid = data.chatid.strip()
+    password = data.password.strip()
+
+    if not chatid or not password:
+        raise HTTPException(status_code=400, detail="Chat ID e password sono obbligatori.")
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, bottoken, chatid, checkinterval, passwordhash
+        FROM users
+        WHERE chatid=?
+    """, (chatid,))
+    row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Account non trovato.")
+
+    user_id, bottoken, saved_chatid, checkinterval, passwordhash = row
+
+    if not passwordhash or not verify_password(password, passwordhash):
+        raise HTTPException(status_code=401, detail="Password non corretta.")
+
+    return {
+        "status": "logged",
+        "userid": user_id,
+        "bottoken": bottoken or "",
+        "chatid": saved_chatid or "",
+        "checkinterval": checkinterval or 5
+    }
+
+@app.post("/users/settings")
+async def save_settings(settings: UserSettings):
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users
+        SET bottoken=?, chatid=?, checkinterval=?, updatedat=?
+        WHERE id=?
+    """, (
+        settings.bottoken,
+        settings.chatid,
+        settings.checkinterval,
+        datetime.now().isoformat(),
+        settings.userid
+    ))
+    conn.commit()
+    sendtelegrammessage(settings.userid, "✅ Impostazioni salvate correttamente!")
+    return {"status": "saved"}
+    
 # --- IMPORT MASSIVO CON CODA BACKGROUND ---
 def process_mass_import(user_id: str, urls: list[str]):
     success_count = 0
