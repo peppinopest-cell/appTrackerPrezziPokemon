@@ -352,11 +352,11 @@ async def add_watch(item: WatchItem):
     return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": data["price"], "image": data["image"], "condition": data.get("condition"), "language": data.get("language")}
 @app.post("/auth/register")
 async def register_user(data: RegisterUserModel):
-    bottoken = data.bottoken.strip()
-    chatid = data.chatid.strip()
+    bot_token = data.bottoken.strip()
+    chat_id = data.chatid.strip()
     password = data.password.strip()
 
-    if not bottoken or not chatid or not password:
+    if not bot_token or not chat_id or not password:
         raise HTTPException(status_code=400, detail="Bot Token, Chat ID e password sono obbligatori.")
 
     pwd_error = validate_password(password)
@@ -364,7 +364,8 @@ async def register_user(data: RegisterUserModel):
         raise HTTPException(status_code=400, detail=pwd_error)
 
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE chatid=?", (chatid,))
+    # ATTENZIONE: La colonna è chat_id con l'underscore
+    cur.execute("SELECT id FROM users WHERE chat_id=?", (chat_id,))
     existing = cur.fetchone()
     if existing:
         raise HTTPException(status_code=400, detail="Esiste già un account associato a questo Chat ID.")
@@ -373,13 +374,14 @@ async def register_user(data: RegisterUserModel):
     now = datetime.now().isoformat()
     passwordhash = hash_password(password)
 
+    # ATTENZIONE: Nomi colonne corretti (bot_token, chat_id, check_interval, created_at)
     cur.execute("""
-        INSERT INTO users (id, bottoken, chatid, checkinterval, createdat, passwordhash, updatedat)
+        INSERT INTO users (id, bot_token, chat_id, check_interval, created_at, passwordhash, updatedat)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         user_id,
-        bottoken,
-        chatid,
+        bot_token,
+        chat_id,
         data.checkinterval,
         now,
         passwordhash,
@@ -387,13 +389,46 @@ async def register_user(data: RegisterUserModel):
     ))
     conn.commit()
 
-    sendtelegrammessage(user_id, "✅ Account creato correttamente! Il tuo profilo è stato registrato.")
+    send_telegram_message(user_id, "✅ Account creato correttamente! Il tuo profilo è stato registrato.")
 
     return {
         "status": "registered",
         "userid": user_id,
-        "chatid": chatid,
+        "chatid": chat_id,
         "checkinterval": data.checkinterval
+    }
+
+@app.post("/auth/login")
+async def login_user(data: LoginUserModel):
+    chat_id = data.chatid.strip()
+    password = data.password.strip()
+
+    if not chat_id or not password:
+        raise HTTPException(status_code=400, detail="Chat ID e password sono obbligatori.")
+
+    cur = conn.cursor()
+    # ATTENZIONE: Nomi colonne corretti (bot_token, chat_id, check_interval)
+    cur.execute("""
+        SELECT id, bot_token, chat_id, check_interval, passwordhash
+        FROM users
+        WHERE chat_id=?
+    """, (chat_id,))
+    row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Account non trovato.")
+
+    user_id, bot_token, saved_chatid, check_interval, passwordhash = row
+
+    if not passwordhash or not verify_password(password, passwordhash):
+        raise HTTPException(status_code=401, detail="Password non corretta.")
+
+    return {
+        "status": "logged",
+        "userid": user_id,
+        "bottoken": bot_token or "",
+        "chatid": saved_chatid or "",
+        "checkinterval": check_interval or 5
     }
 
 @app.post("/auth/login")
@@ -431,21 +466,21 @@ async def login_user(data: LoginUserModel):
 @app.post("/users/settings")
 async def save_settings(settings: UserSettings):
     cur = conn.cursor()
+    # ATTENZIONE: Nomi colonne corretti
     cur.execute("""
         UPDATE users
-        SET bottoken=?, chatid=?, checkinterval=?, updatedat=?
+        SET bot_token=?, chat_id=?, check_interval=?, updatedat=?
         WHERE id=?
     """, (
-        settings.bottoken,
-        settings.chatid,
-        settings.checkinterval,
+        settings.bot_token,
+        settings.chat_id,
+        settings.check_interval,
         datetime.now().isoformat(),
-        settings.userid
+        settings.user_id
     ))
     conn.commit()
-    sendtelegrammessage(settings.userid, "✅ Impostazioni salvate correttamente!")
+    send_telegram_message(settings.user_id, "✅ Impostazioni salvate correttamente!")
     return {"status": "saved"}
-    
 # --- IMPORT MASSIVO CON CODA BACKGROUND ---
 def process_mass_import(user_id: str, urls: list[str]):
     success_count = 0
