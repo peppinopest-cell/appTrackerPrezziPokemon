@@ -235,7 +235,7 @@ img_tag = soup.select_one('.image-container img, .product-image img, .card-image
 if img_tag:
 image_url = img_tag.get('src') or img_tag.get('data-src') or ""
 if not image_url:
-match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+.(?:jpg|png)', html_text)
+match = re.search(r'https?://[^\\s"\']+\\.(?:jpg|png)', html_text)
 if match:
 image_url = match.group(0)
 if image_url.startswith("//"):
