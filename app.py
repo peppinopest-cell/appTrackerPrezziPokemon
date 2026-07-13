@@ -20,7 +20,7 @@ import hmac
 import requests as std_requests
 
 
-app = FastAPI(title="ðŸ”´ PokÃ© Price Bot API")
+app = FastAPI(title="🔴 Poké Price Bot API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,6 +39,10 @@ cur.execute('''CREATE TABLE IF NOT EXISTS users
 
 cur.execute('''CREATE TABLE IF NOT EXISTS watchlist 
                (id INTEGER PRIMARY KEY, user_id TEXT, url TEXT, last_price REAL, created_at TEXT)''')
+cur.execute('''CREATE TABLE IF NOT EXISTS collection_sets 
+               (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,name TEXT NOT NULL, is_masterset INTEGER DEFAULT 0,created_at TEXT)''')
+cur.execute('''CREATE TABLE IF NOT EXISTS collection_cards 
+               (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,set_id INTEGER,set_name TEXT,card_name TEXT,card_number TEXT,url TEXT NOT NULL,quantity INTEGER DEFAULT 1,last_price REAL,image_url TEXT,condition TEXT,language TEXT,created_at TEXT,updated_at TEXT)''')
 
 # Migrazione: Aggiungo colonne immagine, condizione, lingua
 try:
@@ -65,10 +69,15 @@ try:
 except:
     pass
 
+try:
+    cur.execute("ALTER TABLE collection_cards ADD COLUMN updated_at TEXT")
+except:
+    pass
+
 conn.commit()
 
 conn.commit()
-print("âœ… Database inizializzato")
+print("✅ Database inizializzato")
 
 job_lock = threading.Lock()
 scrape_semaphore = threading.Semaphore(3) # <--- AGGIUNGI QUESTO: Massimo 3 
@@ -98,6 +107,23 @@ class RegisterUserModel(BaseModel):
 class LoginUserModel(BaseModel):
     chatid: str
     password: str
+
+class CollectionSetCreate(BaseModel):
+    user_id: str
+    name: str
+    is_masterset: bool = False
+
+class CollectionCardCreate(BaseModel):
+    user_id: str
+    url: str
+    set_id: int | None = None
+    set_name: str | None = None
+    card_name: str | None = None
+    card_number: str | None = None
+    quantity: int = 1
+
+class CollectionRecalculateRequest(BaseModel):
+    user_id: str
     
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -139,7 +165,7 @@ def parse_prezzo(prezzo_str):
     if not prezzo_str or prezzo_str == "N/D":
         return None
     try:
-        pulito = prezzo_str.replace("â‚¬", "").replace(".", "").replace(",", ".").strip()
+        pulito = prezzo_str.replace("€", "").replace(".", "").replace(",", ".").strip()
         return float(pulito)
     except:
         return None
@@ -158,6 +184,119 @@ def send_telegram_message(user_id, testo):
         std_requests.post(url, json=payload, timeout=10)
     except:
         pass
+
+def normalize_card_name_from_url(url: str) -> str:
+    try:
+        return url.split('/')[-1].split('?')[0].replace('-', ' ')
+    except:
+        return "Carta"
+
+def get_collection_payload(user_id: str):
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            id, user_id, set_id, set_name, card_name, card_number, url,
+            quantity, last_price, image_url, condition, language, created_at, updated_at
+        FROM collection_cards
+        WHERE user_id=?
+        ORDER BY id DESC
+    """, (user_id,))
+    all_cards = cur.fetchall()
+
+    cur.execute("""
+        SELECT id, name, is_masterset, created_at
+        FROM collection_sets
+        WHERE user_id=?
+        ORDER BY id DESC
+    """, (user_id,))
+    sets_rows = cur.fetchall()
+
+    cards_by_set = {}
+    loose_cards = []
+    total_value = 0.0
+
+    for row in all_cards:
+        card = {
+            "id": row[0],
+            "user_id": row[1],
+            "set_id": row[2],
+            "set_name": row[3] or "",
+            "card_name": row[4] or normalize_card_name_from_url(row[6]),
+            "card_number": row[5] or "",
+            "url": row[6],
+            "quantity": row[7] or 1,
+            "last_price": row[8] or 0,
+            "image_url": row[9] or "",
+            "condition": row[10] or "N/A",
+            "language": row[11] or "🌐",
+            "created_at": row[12],
+            "updated_at": row[13],
+            "row_total": (row[8] or 0) * (row[7] or 1)
+        }
+
+        total_value += card["row_total"]
+
+        if row[2]:
+            cards_by_set.setdefault(row[2], []).append(card)
+        else:
+            loose_cards.append(card)
+
+    sets = []
+    for s in sets_rows:
+        set_cards = cards_by_set.get(s[0], [])
+        set_total = sum(card["row_total"] for card in set_cards)
+
+        sets.append({
+            "id": s[0],
+            "name": s[1],
+            "is_masterset": bool(s[2]),
+            "created_at": s[3],
+            "cards_count": len(set_cards),
+            "total_value": round(set_total, 2),
+            "cards": set_cards
+        })
+
+    loose_total = sum(card["row_total"] for card in loose_cards)
+
+    return {
+        "total_value": round(total_value, 2),
+        "cards_count": len(all_cards),
+        "sets": sets,
+        "loose_cards": loose_cards,
+        "loose_cards_count": len(loose_cards),
+        "loose_cards_total": round(loose_total, 2)
+    }
+
+def refresh_collection_prices_for_user(user_id: str):
+    cur = conn.cursor()
+    cur.execute("SELECT id, url FROM collection_cards WHERE user_id=?", (user_id,))
+    rows = cur.fetchall()
+
+    if not rows:
+        return 0
+
+    refreshed = 0
+    for row in rows:
+        card_id, url = row
+        data = scrape_card_data(url)
+        if data and data.get("price") is not None:
+            cur.execute("""
+                UPDATE collection_cards
+                SET last_price=?, image_url=?, condition=?, language=?, updated_at=?
+                WHERE id=?
+            """, (
+                data["price"],
+                data.get("image", ""),
+                data.get("condition", "N/A"),
+                data.get("language", "🌐"),
+                datetime.now().isoformat(),
+                card_id
+            ))
+            conn.commit()
+            refreshed += 1
+            time.sleep(random.uniform(2.0, 4.0))
+    return refreshed
 
 # --- SCRAPING CORE ---
 def scrape_card_data(url, max_retries=3):
@@ -214,13 +353,13 @@ def scrape_card_data(url, max_retries=3):
                 
                 price = None
                 condition = "N/A"
-                language = "ðŸŒ"
+                language = "🌐"
                 image_url = ""
     
                            # --- 1. ESTRAZIONE IMMAGINE (Nuovo metodo Anti-Blocco) ---
                 image_url = ""
                 
-                # Tentativo 1: Il tag meta ufficiale og:image per i social network (il piÃ¹ affidabile)
+                # Tentativo 1: Il tag meta ufficiale og:image per i social network (il più affidabile)
                 img_meta = soup.find('meta', property='og:image')
                 if img_meta and img_meta.get('content'):
                     image_url = img_meta['content']
@@ -268,15 +407,15 @@ def scrape_card_data(url, max_retries=3):
                                 lang_text = match.group(1)
     
                         lang_map = {
-                            "Inglese": "ðŸ‡¬ðŸ‡§",
-                            "Italiano": "ðŸ‡®ðŸ‡¹",
-                            "Francese": "ðŸ‡«ðŸ‡·",
-                            "Tedesco": "ðŸ‡©ðŸ‡ª",
-                            "Spagnolo": "ðŸ‡ªðŸ‡¸",
-                            "Portoghese": "ðŸ‡µðŸ‡¹",
-                            "Giapponese": "ðŸ‡¯ðŸ‡µ",
-                            "Coreano": "ðŸ‡°ðŸ‡·",
-                            "Cinese": "ðŸ‡¨ðŸ‡³"
+                            "Inglese": "🇬🇧",
+                            "Italiano": "🇮🇹",
+                            "Francese": "🇫🇷",
+                            "Tedesco": "🇩🇪",
+                            "Spagnolo": "🇪🇸",
+                            "Portoghese": "🇵🇹",
+                            "Giapponese": "🇯🇵",
+                            "Coreano": "🇰🇷",
+                            "Cinese": "🇨🇳"
                         }
                         for k, v in lang_map.items():
                             if k.lower() in lang_text.lower():
@@ -289,7 +428,7 @@ def scrape_card_data(url, max_retries=3):
                     if not prezzo_tag:
                         tabelle = soup.select("dd.col-6.col-xl-7")
                         for tag in tabelle:
-                            if "â‚¬" in tag.get_text(" ", strip=True):
+                            if "€" in tag.get_text(" ", strip=True):
                                 prezzo_tag = tag
                                 break
                     if prezzo_tag:
@@ -317,7 +456,7 @@ async def save_settings(settings: UserSettings):
     cur.execute("INSERT OR REPLACE INTO users (id, bot_token, chat_id, check_interval, created_at) VALUES (?, ?, ?, ?, ?)",
                 (settings.user_id, settings.bot_token, settings.chat_id, settings.check_interval, datetime.now().isoformat()))
     conn.commit()
-    send_telegram_message(settings.user_id, "ðŸ”´ PokÃ© Price Bot: Impostazioni salvate correttamente! InizierÃ² a tracciare le tue carte.")
+    send_telegram_message(settings.user_id, "🔴 Poké Price Bot: Impostazioni salvate correttamente! Inizierò a tracciare le tue carte.")
     return {"status": "saved"}
 
 @app.get("/users/{user_id}/settings")
@@ -328,6 +467,110 @@ async def get_settings(user_id: str):
     if row:
         return {"bot_token": row[0], "chat_id": row[1], "check_interval": row[2]}
     return {"bot_token": "", "chat_id": "", "check_interval": 5}
+
+# -----------------------------
+# COLLECTION ENDPOINTS
+# -----------------------------
+@app.post("/collection/sets")
+async def create_collection_set(item: CollectionSetCreate):
+    if not item.name.strip():
+        raise HTTPException(status_code=400, detail="Il nome del set è obbligatorio.")
+
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO collection_sets (user_id, name, is_masterset, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (
+        item.user_id,
+        item.name.strip(),
+        1 if item.is_masterset else 0,
+        datetime.now().isoformat()
+    ))
+    conn.commit()
+
+    return {
+        "status": "created",
+        "id": cur.lastrowid,
+        "name": item.name.strip(),
+        "is_masterset": item.is_masterset
+    }
+
+@app.post("/collection/cards")
+async def add_collection_card(item: CollectionCardCreate):
+    final_url = item.url.strip()
+    if "cardmarket.com" not in final_url:
+        raise HTTPException(status_code=400, detail="URL non valido. Assicurati che sia un link di Cardmarket.")
+
+    quantity = item.quantity if item.quantity and item.quantity > 0 else 1
+
+    data = scrape_card_data(final_url)
+    if not data or data["price"] is None:
+        raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo per la carta della collezione.")
+
+    final_card_name = item.card_name.strip() if item.card_name and item.card_name.strip() else normalize_card_name_from_url(final_url)
+    final_set_name = item.set_name.strip() if item.set_name and item.set_name.strip() else None
+    final_card_number = item.card_number.strip() if item.card_number and item.card_number.strip() else None
+
+    cur = conn.cursor()
+
+    if item.set_id:
+        cur.execute("SELECT name FROM collection_sets WHERE id=? AND user_id=?", (item.set_id, item.user_id))
+        set_row = cur.fetchone()
+        if not set_row:
+            raise HTTPException(status_code=404, detail="Set non trovato.")
+        final_set_name = set_row[0]
+
+    cur.execute("""
+        INSERT INTO collection_cards (
+            user_id, set_id, set_name, card_name, card_number, url, quantity,
+            last_price, image_url, condition, language, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        item.user_id,
+        item.set_id,
+        final_set_name,
+        final_card_name,
+        final_card_number,
+        final_url,
+        quantity,
+        data["price"],
+        data.get("image", ""),
+        data.get("condition", "N/A"),
+        data.get("language", "🌐"),
+        datetime.now().isoformat(),
+        datetime.now().isoformat()
+    ))
+    conn.commit()
+
+    return {
+        "status": "added",
+        "id": cur.lastrowid,
+        "price": data["price"],
+        "card_name": final_card_name,
+        "set_name": final_set_name,
+        "quantity": quantity
+    }
+
+@app.get("/collection/{user_id}")
+async def get_collection(user_id: str):
+    return get_collection_payload(user_id)
+
+@app.delete("/collection/cards/{card_id}")
+async def delete_collection_card(card_id: int):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM collection_cards WHERE id=?", (card_id,))
+    conn.commit()
+    return {"status": "deleted"}
+
+@app.post("/collection/recalculate")
+async def recalculate_collection(data: CollectionRecalculateRequest, background_tasks: BackgroundTasks):
+    def task():
+        refreshed = refresh_collection_prices_for_user(data.user_id)
+        send_telegram_message(data.user_id, f"📚 Collezione aggiornata!\nCarte ricalcolate: {refreshed}")
+
+    background_tasks.add_task(task)
+    return {"status": "processing", "message": "Ricalcolo collezione avviato."}
 
 # --- AGGIUNTA SINGOLA ---
 @app.post("/watch")
@@ -342,14 +585,14 @@ async def add_watch(item: WatchItem):
     nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
 
     if not data or data["price"] is None:
-        raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova piÃ¹ tardi.")
+        raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
 
     cur = conn.cursor()
     cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, condition, language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (item.user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", "ðŸŒ"), datetime.now().isoformat()))
+                (item.user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), datetime.now().isoformat()))
     conn.commit()
 
-    send_telegram_message(item.user_id, f"âœ… {nome} aggiunta!\nðŸ—£ï¸ {data.get('language', 'ðŸŒ')} | ðŸ·ï¸ {data.get('condition', 'N/A')}\nðŸ’° Prezzo iniziale: {data['price']}â‚¬")
+    send_telegram_message(item.user_id, f"✅ {nome} aggiunta!\n🗣️ {data.get('language', '🌐')} | 🏷️ {data.get('condition', 'N/A')}\n💰 Prezzo iniziale: {data['price']}€")
     time.sleep(random.uniform(2.5, 5.0))
     
     return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": data["price"], "image": data["image"], "condition": data.get("condition"), "language": data.get("language")}
@@ -367,11 +610,11 @@ async def register_user(data: RegisterUserModel):
         raise HTTPException(status_code=400, detail=pwd_error)
 
     cur = conn.cursor()
-    # ATTENZIONE: La colonna Ã¨ chat_id con l'underscore
+    # ATTENZIONE: La colonna è chat_id con l'underscore
     cur.execute("SELECT id FROM users WHERE chat_id=?", (chat_id,))
     existing = cur.fetchone()
     if existing:
-        raise HTTPException(status_code=400, detail="Esiste giÃ  un account associato a questo Chat ID.")
+        raise HTTPException(status_code=400, detail="Esiste già un account associato a questo Chat ID.")
 
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     now = datetime.now().isoformat()
@@ -392,7 +635,7 @@ async def register_user(data: RegisterUserModel):
     ))
     conn.commit()
 
-    send_telegram_message(user_id, "âœ… Account creato correttamente! Il tuo profilo Ã¨ stato registrato.")
+    send_telegram_message(user_id, "✅ Account creato correttamente! Il tuo profilo è stato registrato.")
 
     return {
         "status": "registered",
@@ -482,7 +725,7 @@ async def save_settings(settings: UserSettings):
         settings.user_id
     ))
     conn.commit()
-    send_telegram_message(settings.user_id, "âœ… Impostazioni salvate correttamente!")
+    send_telegram_message(settings.user_id, "✅ Impostazioni salvate correttamente!")
     return {"status": "saved"}
 # --- IMPORT MASSIVO CON CODA BACKGROUND ---
 def process_mass_import(user_id: str, urls: list[str]):
@@ -498,15 +741,15 @@ def process_mass_import(user_id: str, urls: list[str]):
             cur.execute("SELECT id FROM watchlist WHERE user_id=? AND url=?", (user_id, final_url))
             if not cur.fetchone():
                 cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, condition, language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", "ðŸŒ"), datetime.now().isoformat()))
+                            (user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), datetime.now().isoformat()))
                 conn.commit()
                 success_count += 1
         
         time.sleep(random.uniform(10.0, 18.0))
         
-    msg = f"ðŸ“¦ Import completato!\nAggiunte {success_count}/{len(urls)} carte al tracciamento."
+    msg = f"📦 Import completato!\nAggiunte {success_count}/{len(urls)} carte al tracciamento."
     if success_count < len(urls):
-        msg += "\nâš ï¸ Alcune carte non sono state caricate (possibile blocco di Cardmarket). Riprova."
+        msg += "\n⚠️ Alcune carte non sono state caricate (possibile blocco di Cardmarket). Riprova."
     send_telegram_message(user_id, msg)
 
 @app.post("/watch/mass")
@@ -527,7 +770,7 @@ async def get_watchlist(user_id: str):
             "last_price": row[2], 
             "image_url": row[3] or "",
             "condition": row[4] or "N/A",
-            "language": row[5] or "ðŸŒ"
+            "language": row[5] or "🌐"
         } for row in cur.fetchall()
     ]
 
@@ -585,7 +828,7 @@ def job_check_prices():
             user_id = user_row[0]
             interval = user_row[1] or 5
             
-            # Se Ã¨ il momento giusto per questo utente, lo aggiungo alla lista
+            # Se è il momento giusto per questo utente, lo aggiungo alla lista
             if current_minute % interval == 0:
                 users_to_check.append(user_id)
                 
@@ -609,11 +852,11 @@ def job_check_prices():
 
         # Funzione helper per il multithreading
         def fetch_url(url):
-            # scrape_card_data contiene giÃ  i tuoi time.sleep() random per evitare blocchi
+            # scrape_card_data contiene già i tuoi time.sleep() random per evitare blocchi
             return url, scrape_card_data(url)
 
         # 4. MULTITHREADING: Apro 3 "corsie" parallele (max_workers=3)
-        # 3 Ã¨ un numero sicuro per non far arrabbiare Cloudflare su un IP gratuito
+        # 3 è un numero sicuro per non far arrabbiare Cloudflare su un IP gratuito
         with ThreadPoolExecutor(max_workers=3) as executor:
             results = executor.map(fetch_url, unique_urls)
             for url, data in results:
@@ -629,15 +872,15 @@ def job_check_prices():
             if data and data["price"] is not None:
                 new_price = data["price"]
                 
-                # Se il prezzo Ã¨ cambiato (o Ã¨ la prima volta)
+                # Se il prezzo è cambiato (o è la prima volta)
                 if old_price is None or new_price != old_price:
                     nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
-                    msg = f"ðŸš¨ AGGIORNAMENTO PREZZO!\nðŸƒ {nome}\nðŸ—£ï¸ {data.get('language', 'ðŸŒ')} | ðŸ·ï¸ {data.get('condition', 'N/A')}\nðŸ’¶ Nuovo prezzo: {new_price}â‚¬ (era {old_price}â‚¬)\nðŸ”— {url}"
+                    msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n🗣️ {data.get('language', '🌐')} | 🏷️ {data.get('condition', 'N/A')}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
                     send_telegram_message(user_id, msg)
                     
                     cur_update = conn.cursor()
                     cur_update.execute("UPDATE watchlist SET last_price=?, image_url=?, condition=?, language=? WHERE id=?", 
-                                       (new_price, data["image"], data.get("condition", "N/A"), data.get("language", "ðŸŒ"), watch_id))
+                                       (new_price, data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), watch_id))
         
         # Salvo tutti i cambiamenti nel database in un colpo solo
         conn.commit()
@@ -645,8 +888,29 @@ def job_check_prices():
     finally:
         job_lock.release()
 
+def job_refresh_collection_prices():
+    if not job_lock.acquire(blocking=False):
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users")
+        users = cur.fetchall()
+
+        for user_row in users:
+            user_id = user_row[0]
+            try:
+                refresh_collection_prices_for_user(user_id)
+                time.sleep(random.uniform(5.0, 9.0))
+            except:
+                pass
+    finally:
+        job_lock.release()
+
 def run_scheduler():
     schedule.every(1).minutes.do(job_check_prices)
+    schedule.every().day.at("04:30").do(job_refresh_collection_prices)
+
     while True:
         schedule.run_pending()
         time.sleep(10)
