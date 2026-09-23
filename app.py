@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from catalog import card_options, catalog_lock, fetch_catalog, validate_path
-from pricing import CardmarketReader, CONDITIONS, LANGUAGES, filtered_url, product_url
+from pricing import CardmarketReader, CONDITIONS, LANGUAGES, filtered_url, product_url, scrape_card_data
 
 log = logging.getLogger("pricebot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -320,7 +320,7 @@ def worker_step():
         c.execute("UPDATE worker_state SET lease_until=?,next_request=? WHERE id=1", (now+180, now+MIN_GAP))
     q = dict(quote)
     try:
-        result = reader.fetch(q["url"], q["language"], q["condition"], q["variant"])
+        result = scrape_card_data(q["url"], q["language"], q["condition"], q["variant"], client=reader)
     except Exception as exc:
         # Do not log request URLs with credentials or raw page contents.
         log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])

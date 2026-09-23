@@ -9,7 +9,7 @@ from unittest.mock import patch, Mock
 os.environ["RUN_WORKER"] = "0"
 import app as backend
 from fastapi.testclient import TestClient
-from pricing import parse_offers, filtered_url, money_cents, product_url, CardmarketReader
+from pricing import parse_offers, filtered_url, money_cents, product_url, CardmarketReader, scrape_card_data
 from catalog import card_options
 
 URL = "https://www.cardmarket.com/en/Pokemon/Products?idProduct=483559"
@@ -57,6 +57,12 @@ class ParserTests(unittest.TestCase):
         with patch.object(reader.session, "get", return_value=Mock(status_code=403, headers={})) as get:
             self.assertEqual(reader.fetch(URL, "it", "NM", "normal")["status"], "blocked")
             self.assertEqual(get.call_count, 1)
+
+    def test_scrape_card_data_delegates_to_the_shared_reader(self):
+        reader = Mock()
+        reader.fetch.return_value = {"status": "ok", "price_cents": 450}
+        self.assertEqual(scrape_card_data(URL, "it", "NM", "reverse", client=reader)["price_cents"], 450)
+        reader.fetch.assert_called_once_with(URL, "it", "NM", "reverse")
 
     def test_ambiguous_mapping_is_not_guessed(self):
         card = {"variants_detailed": [{"type": "normal", "thirdParty": {"cardmarket": 42}}, {"type": "holo", "thirdParty": {"cardmarket": 42}}]}
