@@ -571,12 +571,14 @@ def worker_step():
             return False
         c.execute("UPDATE worker_state SET lease_until=?,next_request=? WHERE id=1", (now+180, now+MIN_GAP))
     q = dict(quote)
+    
     try:
-    result = fetch_price_with_cffi(q["url"], q["language"], q["condition"], q["variant"])
+        result = fetch_price_with_cffi(q["url"], q["language"], q["condition"], q["variant"])
     except Exception as exc:
-    # Do not log request URLs with credentials or raw page contents.
-    log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])
-    result = {"status": "error", "message": "Recupero non riuscito. Nuovo tentativo programmato."}
+        # Do not log request URLs with credentials or raw page contents.
+        log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])
+        result = {"status": "error", "message": "Recupero non riuscito. Nuovo tentativo programmato."}
+        
     now = time.time()
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
