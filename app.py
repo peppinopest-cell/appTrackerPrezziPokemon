@@ -21,6 +21,10 @@ from pydantic import BaseModel, Field
 
 from catalog import card_options, catalog_lock, fetch_catalog, validate_path
 from pricing import CardmarketReader, CONDITIONS, LANGUAGES, filtered_url, product_url
+import random
+import re
+from bs4 import BeautifulSoup
+from curl_cffi import requests as cffi_requests
 
 log = logging.getLogger("pricebot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -306,6 +310,254 @@ def schedule_due(c, now):
         """, (CACHE_SECONDS, COLLECTION_INTERVAL, now))
 
 
+# --- Scraping legacy recuperato da app.py ---
+def parse_prezzo(prezzo_str):
+    if not prezzo_str or prezzo_str == "N/D":
+        return None
+
+    try:
+        pulito = prezzo_str.replace("€", "").replace(".", "").replace(",", ".").strip()
+        return float(pulito)
+    except Exception:
+        return None
+
+
+def scrape_card_data(url, max_retries=3):
+    identities = [
+        {
+            "name": "safari-main",
+            "impersonate": "safari15_5",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+            }
+        },
+        {
+            "name": "chrome-fallback",
+            "impersonate": "chrome120",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        }
+    ]
+
+    last_status = None
+    retry_after = None
+
+    for attempt in range(max_retries):
+        try:
+            identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
+
+            time.sleep(random.uniform(1.2, 3.2))
+
+            cache_buster = random.randint(1000000, 9999999)
+            separator = "&" if "?" in url else "?"
+            url_busted = f"{url}{separator}nocache={cache_buster}"
+
+            response = cffi_requests.get(
+                url_busted,
+                impersonate=identity["impersonate"],
+                headers=identity["headers"],
+                timeout=18
+            )
+
+            last_status = response.status_code
+
+            try:
+                retry_after = response.headers.get("Retry-After")
+            except Exception:
+                retry_after = None
+
+            if response.status_code in (403, 429):
+                time.sleep(random.uniform(4.0, 7.0))
+                continue
+
+            if response.status_code >= 500:
+                time.sleep(random.uniform(4.0, 7.0))
+                continue
+
+            html_text = response.text
+            soup = BeautifulSoup(html_text, "html.parser")
+
+            lowered = html_text.lower()
+            if any(marker in lowered for marker in (
+                "captcha",
+                "cf-challenge",
+                "challenge-platform",
+                "attention required",
+                "just a moment"
+            )):
+                return {
+                    "status": "blocked",
+                    "http_status": response.status_code,
+                    "retry_after": retry_after,
+                    "price": None
+                }
+
+            price = None
+            condition = "N/A"
+            language = "🌐"
+            image_url = ""
+
+            # --- 1. ESTRAZIONE IMMAGINE ---
+            img_meta = soup.find("meta", property="og:image")
+            if img_meta and img_meta.get("content"):
+                image_url = img_meta["content"]
+
+            if not image_url:
+                img_tag = soup.select_one(".image-container img, .product-image img, .card-image img")
+                if img_tag:
+                    image_url = img_tag.get("src") or img_tag.get("data-src") or ""
+
+            if not image_url:
+                match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
+                if match:
+                    image_url = match.group(0)
+
+            if image_url.startswith("//"):
+                image_url = "https:" + image_url
+            elif image_url.startswith("/"):
+                image_url = "https://www.cardmarket.com" + image_url
+
+            # --- 2. ESTRAZIONE TABELLA PREZZO / LINGUA / CONDIZIONE ---
+            first_row = soup.select_one("div.row.article-row")
+
+            if first_row:
+                price_tag = first_row.select_one(
+                    ".price-container .color-primary, "
+                    ".color-primary.small, "
+                    "span.fw-bold, "
+                    ".font-weight-bold.color-primary"
+                )
+
+                if price_tag:
+                    price = parse_prezzo(price_tag.get_text(strip=True))
+
+                cond_tag = first_row.select_one("a.article-condition span.badge")
+                if cond_tag:
+                    condition = cond_tag.get_text(strip=True)
+
+                lang_tag = first_row.select_one(
+                    "span.icon[aria-label], "
+                    "span.icon[data-original-title], "
+                    "span.icon[onmouseover]"
+                )
+
+                if lang_tag:
+                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
+
+                    if not lang_text and lang_tag.get("onmouseover"):
+                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
+                        if match:
+                            lang_text = match.group(1)
+
+                    lang_map = {
+                        "Inglese": "🇬🇧",
+                        "Italiano": "🇮🇹",
+                        "Francese": "🇫🇷",
+                        "Tedesco": "🇩🇪",
+                        "Spagnolo": "🇪🇸",
+                        "Portoghese": "🇵🇹",
+                        "Giapponese": "🇯🇵",
+                        "Coreano": "🇰🇷",
+                        "Cinese": "🇨🇳"
+                    }
+
+                    for k, v in lang_map.items():
+                        if k.lower() in lang_text.lower():
+                            language = v
+                            break
+
+            # --- 3. FALLBACK PREZZO ---
+            if price is None:
+                prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+
+                if not prezzo_tag:
+                    tabelle = soup.select("dd.col-6.col-xl-7")
+                    for tag in tabelle:
+                        if "€" in tag.get_text(" ", strip=True):
+                            prezzo_tag = tag
+                            break
+
+                if prezzo_tag:
+                    price = parse_prezzo(prezzo_tag.get_text(strip=True))
+
+            if price is not None:
+                return {
+                    "status": "ok",
+                    "price": price,
+                    "image": image_url,
+                    "condition": condition,
+                    "language": language,
+                    "http_status": response.status_code
+                }
+
+        except Exception:
+            pass
+
+        time.sleep(random.uniform(4.5, 8.5))
+
+    if last_status in (403, 429):
+        return {
+            "status": "blocked",
+            "http_status": last_status,
+            "retry_after": retry_after,
+            "price": None
+        }
+
+    return {
+        "status": "error",
+        "http_status": last_status,
+        "price": None
+    }
+
+
+def fetch_price_with_cffi(url, language, condition, variant):
+    """
+    Wrapper compatibile con il worker di app2.py.
+
+    app2.py si aspetta:
+    - status: ok / blocked / error
+    - price_cents: int, se status == ok
+    - message: str
+    - retry_after e http_status opzionali se blocked
+    """
+    scraped = scrape_card_data(url)
+
+    if scraped.get("status") == "blocked":
+        return {
+            "status": "blocked",
+            "message": "Cardmarket ha limitato o bloccato la richiesta.",
+            "http_status": scraped.get("http_status"),
+            "retry_after": scraped.get("retry_after")
+        }
+
+    if scraped.get("status") != "ok" or scraped.get("price") is None:
+        return {
+            "status": "error",
+            "message": "Recupero non riuscito. Nuovo tentativo programmato.",
+            "http_status": scraped.get("http_status")
+        }
+
+    price = float(scraped["price"])
+
+    return {
+        "status": "ok",
+        "price_cents": int(round(price * 100)),
+        "message": f"Prezzo trovato: {price:.2f} €",
+        "http_status": scraped.get("http_status")
+    }
+
+
 def worker_step():
     now = time.time()
     with db() as c:
@@ -320,11 +572,11 @@ def worker_step():
         c.execute("UPDATE worker_state SET lease_until=?,next_request=? WHERE id=1", (now+180, now+MIN_GAP))
     q = dict(quote)
     try:
-        result = reader.fetch(q["url"], q["language"], q["condition"], q["variant"])
+    result = fetch_price_with_cffi(q["url"], q["language"], q["condition"], q["variant"])
     except Exception as exc:
-        # Do not log request URLs with credentials or raw page contents.
-        log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])
-        result = {"status": "error", "message": "Recupero non riuscito. Nuovo tentativo programmato."}
+    # Do not log request URLs with credentials or raw page contents.
+    log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])
+    result = {"status": "error", "message": "Recupero non riuscito. Nuovo tentativo programmato."}
     now = time.time()
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
