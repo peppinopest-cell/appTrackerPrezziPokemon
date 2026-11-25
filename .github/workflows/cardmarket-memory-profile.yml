@@ -1,0 +1,25 @@
+name: FlareSolverr memory profile without Render upgrade
+on:
+  push:
+    branches: [codex/flaresolverr-memory-profile]
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build diagnostic image
+        run: docker build -t pricebot-memory:test .
+      - name: Start isolated one GiB profiler
+        run: docker run -d --name bot-flare --memory=1024m --memory-swap=1024m -p 127.0.0.1:10000:10000 -e PORT=10000 -e FS_MEMORY_DIAGNOSTIC=1 pricebot-memory:test
+      - name: Run bounded read for memory diagnosis
+        run: python scripts/check_flaresolverr_container.py || true
+      - name: Collect memory profile
+        if: always()
+        run: |
+          docker logs bot-flare 2>&1 | python -c "import sys; print(''.join(line for line in sys.stdin if 'FS_MEMORY=' in line or 'WARNING:' in line))"
+          docker stats --no-stream --format '{{.MemUsage}}' bot-flare || true
+          docker exec bot-flare cat /sys/fs/cgroup/memory.events || true
+          docker stop bot-flare || true

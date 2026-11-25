@@ -1,5 +1,8 @@
 """Serialized anonymous browser session used by the existing bot API."""
 import atexit
+import json
+import os
+from pathlib import Path
 import threading
 import time
 from urllib.parse import urlsplit
@@ -11,6 +14,20 @@ from cardmarket_reader import LANGUAGES, parse_page, validate_url
 
 class ReaderError(RuntimeError):
     pass
+
+
+def memory_diagnostic(stage):
+    if os.getenv('FS_MEMORY_DIAGNOSTIC') != '1':
+        return
+    try:
+        base = Path('/sys/fs/cgroup')
+        stat = dict(line.split() for line in (base / 'memory.stat').read_text().splitlines())
+        values = {key: round(int(stat.get(key, 0)) / 1048576, 1) for key in ('anon', 'file', 'slab')}
+        values.update(current=round(int((base / 'memory.current').read_text()) / 1048576, 1),
+                      peak=round(int((base / 'memory.peak').read_text()) / 1048576, 1))
+        print('FS_MEMORY=' + json.dumps({'stage': stage, 'MiB': values}), flush=True)
+    except OSError:
+        pass
 
 
 class FlareSolverrReader:
@@ -31,14 +48,18 @@ class FlareSolverrReader:
         if self.embedded:
             try:
                 if self.embedded_api is None:
+                    memory_diagnostic('before_engine_initialize')
                     import flaresolverr_service
                     import utils
                     from dtos import V1RequestBase
                     utils.get_current_platform()
                     utils.get_user_agent()
+                    memory_diagnostic('after_engine_initialize')
                     self.embedded_api = (flaresolverr_service, utils, V1RequestBase)
                 service, utils, request_type = self.embedded_api
+                memory_diagnostic('before_' + command)
                 data = utils.object_to_dict(service.controller_v1_endpoint(request_type({'cmd': command, **fields})))
+                memory_diagnostic('after_' + command)
             except Exception as exc:
                 raise ReaderError('Il motore FlareSolverr non ha completato la richiesta.') from exc
             if data.get('status') != 'ok':
