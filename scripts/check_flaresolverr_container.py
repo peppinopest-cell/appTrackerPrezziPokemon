@@ -38,3 +38,5 @@ if result['status'] == 'verified_price':
     _, rows = call('/watchlist/container-smoke')
     assert len(rows) == 1 and rows[0]['last_price'] == result['price']
 print('BOT_INTEGRATION_RESULT=' + json.dumps(result), flush=True)
+if result['status'] != 'verified_price':
+    raise SystemExit(2)

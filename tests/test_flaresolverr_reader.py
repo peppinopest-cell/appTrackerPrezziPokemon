@@ -52,5 +52,18 @@ class ReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ReaderError, 'non raggiungibile'):
                 self.reader.read(URL)
 
+    def test_embedded_engine_does_not_use_network_api(self):
+        import sys
+        from types import SimpleNamespace
+        reader = FlareSolverrReader('embedded')
+        service = SimpleNamespace(controller_v1_endpoint=lambda request: {'status': 'ok', 'session': 'test'})
+        from unittest.mock import Mock
+        utils = SimpleNamespace(get_current_platform=Mock(), get_user_agent=Mock(), object_to_dict=lambda value: value)
+        with patch.dict(sys.modules, {'flaresolverr_service': service, 'utils': utils, 'dtos': SimpleNamespace(V1RequestBase=lambda value: value)}), patch('flaresolverr_reader.requests.post') as post:
+            self.assertEqual(reader.command('sessions.create')['session'], 'test')
+            reader.command('sessions.list')
+            utils.get_user_agent.assert_called_once()
+            post.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()

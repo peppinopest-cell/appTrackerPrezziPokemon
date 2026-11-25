@@ -4,8 +4,8 @@ Il backend usa FlareSolverr quando FLARESOLVERR_URL e impostata. In assenza dell
 variabile resta disponibile il lettore originale. Con FlareSolverr attivo non
 vengono usati prezzi medi come ripiego: il prezzo deve provenire da un'offerta.
 
-Configurazione raccomandata: Dockerfile incluso. Avvia bot e FlareSolverr nello
-stesso container, con FlareSolverr raggiungibile soltanto su 127.0.0.1:8191.
+Configurazione raccomandata: Dockerfile incluso. Avvia bot e motore FlareSolverr
+nello stesso processo Python, senza esporre un'API solver pubblica.
 Non richiede ZenRows, chiavi API commerciali o un account Cardmarket.
 Il server deve comunque avere risorse sufficienti per Chromium.
 
@@ -16,7 +16,9 @@ Il volume bot-data conserva il database tra riavvii locali.
 Server cloud: usare un servizio con runtime Docker e questo Dockerfile.
 Il runtime Python attuale di Render non avvia il processo FlareSolverr:
 aggiungere soltanto FLARESOLVERR_URL non installa ne avvia il browser.
-Non esporre la porta 8191 su Internet. La porta pubblica del bot usa PORT.
+La porta pubblica del bot usa PORT. Il modo embedded non apre la porta 8191.
+In alternativa FLARESOLVERR_URL puo puntare a un servizio FlareSolverr privato
+gia disponibile: ad esempio http://127.0.0.1:8191.
 Non attivare piani a pagamento per questa configurazione.
 Su Render senza disco persistente il database rimane effimero come prima.
 

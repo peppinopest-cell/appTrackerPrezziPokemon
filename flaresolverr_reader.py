@@ -15,6 +15,8 @@ class ReaderError(RuntimeError):
 
 class FlareSolverrReader:
     def __init__(self, endpoint, timeout_ms=60000):
+        self.embedded = endpoint == 'embedded'
+        self.embedded_api = None
         self.endpoint = endpoint.rstrip('/')
         if not self.endpoint.endswith('/v1'):
             self.endpoint += '/v1'
@@ -26,6 +28,22 @@ class FlareSolverrReader:
         atexit.register(self.close)
 
     def command(self, command, **fields):
+        if self.embedded:
+            try:
+                if self.embedded_api is None:
+                    import flaresolverr_service
+                    import utils
+                    from dtos import V1RequestBase
+                    utils.get_current_platform()
+                    utils.get_user_agent()
+                    self.embedded_api = (flaresolverr_service, utils, V1RequestBase)
+                service, utils, request_type = self.embedded_api
+                data = utils.object_to_dict(service.controller_v1_endpoint(request_type({'cmd': command, **fields})))
+            except Exception as exc:
+                raise ReaderError('Il motore FlareSolverr non ha completato la richiesta.') from exc
+            if data.get('status') != 'ok':
+                raise ReaderError('FlareSolverr non ha completato la lettura della pagina.')
+            return data
         try:
             response = requests.post(self.endpoint, json={'cmd': command, **fields},
                                      timeout=(5, 5 if command == 'sessions.destroy' else self.timeout_ms / 1000 + 15))
