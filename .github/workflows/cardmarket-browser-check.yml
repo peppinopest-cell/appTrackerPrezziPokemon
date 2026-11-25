@@ -1,4 +1,4 @@
-name: Cardmarket TLS compatibility diagnostic
+name: Cardmarket reader candidate diagnostic
 on:
   push:
     branches: [codex/cardmarket-browser-diagnostic]
@@ -7,10 +7,14 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-      - name: Install diagnostic dependencies
-        run: python -m pip install curl_cffi beautifulsoup4 requests
-      - name: Read one public product page
-        run: PYTHONPATH=. python scripts/check_cardmarket_tls.py
+      - name: Install standard browser
+        run: |
+          python -m pip install playwright beautifulsoup4
+          python -m playwright install --with-deps chromium
+      - name: Verify parser
+        run: python reader-candidate/test_reader.py
+      - name: Read supplied product URL once
+        run: python reader-candidate/check_cloud.py
