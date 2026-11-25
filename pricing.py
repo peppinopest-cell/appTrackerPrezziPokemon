@@ -118,3 +118,18 @@ class CardmarketReader:
                 return {"status": "unverified", "message": "Risposta troppo grande."}
             return parse_offers(response.text, language, condition, variant)
         return {"status": "unverified", "message": "Troppi reindirizzamenti."}
+
+
+def scrape_card_data(url: str, language: str = "it", condition: str = "NM",
+                     variant: str = "normal", client: CardmarketReader | None = None) -> dict:
+    """Retrieve one filtered Cardmarket quote through the shared, conservative reader.
+
+    This preserves the familiar function name used by older versions while
+    returning the v2 result contract: ``ok``, ``blocked``, ``no_match``,
+    ``unverified`` or ``error``. The caller owns scheduling and retries, so a
+    Cloudflare block pauses the queue instead of triggering parallel requests.
+    """
+    try:
+        return (client or CardmarketReader()).fetch(url, language, condition, variant)
+    except requests.RequestException:
+        return {"status": "error", "message": "Recupero prezzo non riuscito. Nuovo tentativo programmato."}
