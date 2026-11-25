@@ -215,6 +215,20 @@ class IntegrationTests(unittest.TestCase):
         self.client.post('/auth/logout', headers=self.headers)
         self.assertEqual(self.client.get('/api/entries', headers=self.headers).status_code, 401)
 
+    def test_telegram_configuration_confirmation_and_errors(self):
+        self.assertEqual(self.client.post('/api/telegram/test').status_code, 401)
+        for code, expected in ((200, 'consegnato'), (401, 'token'), (400, 'Chat ID'), (403, 'Avvia'), (429, 'limitato')):
+            response = Mock(ok=code == 200, status_code=code)
+            response.json.return_value = {'ok': code == 200, 'error_code': code}
+            with patch.object(backend.requests, 'post', return_value=response) as send:
+                result = self.client.post('/api/telegram/test', headers=self.headers)
+                self.assertEqual(result.status_code, 200 if code == 200 else 502)
+                self.assertIn(expected, result.text)
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(send.call_args.kwargs['json']['chat_id'], 'test-user')
+        with patch.object(backend.requests, 'post', side_effect=backend.requests.Timeout):
+            self.assertEqual(self.client.post('/api/telegram/test', headers=self.headers).status_code, 502)
+
     def test_telegram_failure_retries_without_losing_event(self):
         entry_id = self.add()
         with backend.db() as c:

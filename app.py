@@ -477,6 +477,33 @@ def get_settings(user=Depends(current_user)):
     return {"chat_id": user["chat_id"], "has_bot_token": bool(user["bot_token"]), "check_interval": user["check_interval"], "minimum_interval": CACHE_SECONDS//60}
 
 
+@app.post("/api/telegram/test")
+def test_telegram(user=Depends(current_user)):
+    if not user["bot_token"]:
+        raise HTTPException(422, "Inserisci il bot token nelle impostazioni e salva.")
+    try:
+        response = requests.post(f"https://api.telegram.org/bot{user['bot_token']}/sendMessage",
+            json={"chat_id": user["chat_id"], "text": "Price Bot · Configurazione Telegram confermata. Riceverai il primo prezzo verificato delle carte tracciate e una nuova notifica quando cambia."},
+            timeout=(5, 15))
+        body = response.json()
+    except (requests.RequestException, ValueError):
+        raise HTTPException(502, "Telegram non raggiungibile. Impostazioni salvate; riprova il test.")
+    if response.ok and body.get("ok") is True:
+        return {"status": "sent", "message": "Configurazione confermata: messaggio consegnato a Telegram."}
+    code = body.get("error_code", response.status_code)
+    if code in (401, 404):
+        detail = "Bot token non valido. Copia il token completo da BotFather."
+    elif code == 403:
+        detail = "Il bot non può scriverti: apri la sua chat su Telegram, premi Avvia e verifica di non averlo bloccato."
+    elif code == 400:
+        detail = "Telegram non accetta la chat: verifica il Chat ID e premi Avvia nella chat del bot."
+    elif code == 429:
+        detail = "Telegram ha limitato gli invii. Attendi prima di riprovare."
+    else:
+        detail = f"Telegram non ha consegnato il messaggio (codice {code})."
+    raise HTTPException(502, detail)
+
+
 @app.put("/api/settings")
 def put_settings(data: Settings, user=Depends(current_user)):
     with db() as c:
