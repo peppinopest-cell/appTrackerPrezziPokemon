@@ -13,7 +13,7 @@ jobs:
       - name: Build diagnostic image
         run: docker build -t pricebot-memory:test .
       - name: Start isolated 512 MiB optimized profiler
-        run: docker run -d --name bot-flare --memory=512m --memory-swap=512m -p 127.0.0.1:10000:10000 -e PORT=10000 -e FS_MEMORY_DIAGNOSTIC=1 pricebot-memory:test
+        run: docker run -d --name bot-flare --memory=512m --memory-swap=512m -p 127.0.0.1:10000:10000 -e PORT=10000 -e FS_MEMORY_DIAGNOSTIC=1 -e FS_DIRECT_ENTRY=1 pricebot-memory:test
       - name: Run bounded read for memory diagnosis
         run: python scripts/check_flaresolverr_container.py || true
       - name: Collect memory profile

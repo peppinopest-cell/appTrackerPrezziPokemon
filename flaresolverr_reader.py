@@ -118,9 +118,9 @@ class FlareSolverrReader:
                     self.session = self.command('sessions.create')['session']
                     # This is a public anonymous entry page; no login is submitted.
                     locale = urlsplit(url).path.split('/')[1]
-                    if self.embedded:
+                    if self.embedded and os.getenv('FS_DIRECT_ENTRY') != '1':
                         self.prime_anonymous_session(locale)
-                    else:
+                    elif not self.embedded:
                         self.command('request.get', session=self.session,
                                      url=f'https://www.cardmarket.com/{locale}/Pokemon/Login',
                                      maxTimeout=self.timeout_ms, disableMedia=True)
