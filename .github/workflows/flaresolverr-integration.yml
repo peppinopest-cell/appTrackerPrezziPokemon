@@ -15,8 +15,8 @@ jobs:
           python-version: '3.11'
       - name: Test reader behavior
         run: |
-          python -m pip install requests beautifulsoup4
-          python -m unittest discover -s tests -p test_flaresolverr_reader.py
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests -p 'test_flaresolverr*.py'
       - name: Build combined bot and solver
         run: docker build -t pricebot-flaresolverr:test .
       - name: Start with free instance memory limit
@@ -27,5 +27,6 @@ jobs:
         if: always()
         run: |
           docker stats --no-stream --format '{{.MemUsage}}' bot-flare || true
+          docker exec bot-flare cat /sys/fs/cgroup/memory.peak || true
           docker inspect --format 'status={{.State.Status}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}' bot-flare || true
           docker stop bot-flare || true

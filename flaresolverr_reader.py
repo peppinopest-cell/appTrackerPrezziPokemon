@@ -28,7 +28,7 @@ class FlareSolverrReader:
     def command(self, command, **fields):
         try:
             response = requests.post(self.endpoint, json={'cmd': command, **fields},
-                                     timeout=(5, self.timeout_ms / 1000 + 15))
+                                     timeout=(5, 5 if command == 'sessions.destroy' else self.timeout_ms / 1000 + 15))
             response.raise_for_status()
             data = response.json()
         except (requests.RequestException, ValueError) as exc:
@@ -58,9 +58,9 @@ class FlareSolverrReader:
                     locale = urlsplit(url).path.split('/')[1]
                     self.command('request.get', session=self.session,
                                  url=f'https://www.cardmarket.com/{locale}/Pokemon/Login',
-                                 maxTimeout=self.timeout_ms)
+                                 maxTimeout=self.timeout_ms, disableMedia=True)
                 data = self.command('request.get', session=self.session, url=url,
-                                    maxTimeout=self.timeout_ms)
+                                    maxTimeout=self.timeout_ms, disableMedia=True)
                 solution = data.get('solution', {})
                 html = solution.get('response', '')
                 final_url = solution.get('url', url)
@@ -78,6 +78,7 @@ class FlareSolverrReader:
                 soup = BeautifulSoup(html, 'html.parser')
                 image = soup.select_one('meta[property="og:image"]')
                 language = LANGUAGES.get(result['language'], ('', '🌐'))[1]
+                self.last_error = ''
                 return {'price': result['price'], 'image': image.get('content', '') if image else '',
                         'condition': result['condition'], 'language': language}
             except (ReaderError, KeyError) as exc:

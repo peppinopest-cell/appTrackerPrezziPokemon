@@ -15,7 +15,8 @@ signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 
 def main():
-    solver_env = {**os.environ, 'HOST': '127.0.0.1', 'PORT': '8191', 'LOG_LEVEL': 'warning'}
+    solver_env = {**os.environ, 'HOST': '127.0.0.1', 'PORT': '8191', 'LOG_LEVEL': 'warning',
+                  'DISABLE_MEDIA': 'true', 'TEST_URL': 'about:blank'}
     children.append(subprocess.Popen(['/usr/local/bin/python', '-u', '/app/flaresolverr.py'], env=solver_env, cwd='/app', start_new_session=True))
     children.append(subprocess.Popen(['/opt/bot-venv/bin/python', '-m', 'uvicorn', 'app:app', '--host', '0.0.0.0', '--port', os.getenv('PORT', '10000')], start_new_session=True))
     try:
