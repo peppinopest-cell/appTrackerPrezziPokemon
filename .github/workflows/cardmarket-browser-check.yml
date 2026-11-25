@@ -11,16 +11,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        method: [camoufox, seleniumbase, persistent_chromium]
+        method: [camoufox, seleniumbase]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Install shared dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y xvfb xauth libgtk-3-0t64 libasound2t64
+          sudo apt-get install -y xvfb xauth libgtk-3-0t64 libasound2t64 python3-tk tk
           python -m pip install beautifulsoup4
       - name: Install Camoufox
         if: matrix.method == 'camoufox'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python -m pip install camoufox
           python -m camoufox fetch
