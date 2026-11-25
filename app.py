@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
-from fastapi.responses import Response
 import sqlite3
 from datetime import datetime
 import schedule
@@ -149,32 +148,15 @@ def scrape_card_data(url, max_retries=3):
             language = "🌐"
             image_url = ""
 
-                       # --- 1. ESTRAZIONE IMMAGINE (Nuovo metodo Anti-Blocco) ---
-            image_url = ""
-            
-            # Tentativo 1: Il tag meta ufficiale og:image per i social network (il più affidabile)
-            img_meta = soup.find('meta', property='og:image')
-            if img_meta and img_meta.get('content'):
-                image_url = img_meta['content']
-                
-            # Tentativo 2: Cerca qualsiasi immagine dentro il contenitore principale della carta
-            if not image_url:
-                img_tag = soup.select_one('.image-container img, .product-image img, .card-image img')
-                if img_tag:
-                    # Alcuni siti usano data-src per il caricamento pigro, altri src
-                    image_url = img_tag.get('src') or img_tag.get('data-src') or ""
-                    
-            # Tentativo 3: Regex drastica per trovare qualunque cosa finisca con .jpg o .png e abbia "img/" e "Products"
-            if not image_url:
-                match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
-                if match:
-                    image_url = match.group(0)
-
-            # Normalizzazione (Se manca https:)
-            if image_url.startswith("//"):
-                image_url = "https:" + image_url
-            elif image_url.startswith("/"):
-                image_url = "https://www.cardmarket.com" + image_url
+            # 1. ESTRAZIONE IMMAGINE
+            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
+            if img_match:
+                image_url = img_match.group(1)
+                if image_url.startswith("//"): image_url = "https:" + image_url
+            else:
+                img_meta = soup.find("meta", property="og:image")
+                if img_meta and img_meta.get("content"):
+                    image_url = img_meta["content"]
 
             # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
             first_row = soup.select_one("div.row.article-row")
@@ -346,30 +328,6 @@ async def clear_watchlist(user_id: str):
     cur.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
     conn.commit()
     return {"status": "svuotata"}
-
-@app.get("/proxy-image")
-async def proxy_image(url: str):
-    if not url.startswith("http"):
-        raise HTTPException(status_code=400, detail="URL non valido")
-    
-    # Facciamo finta di essere un browser normale su Cardmarket
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://www.cardmarket.com/",
-        "Origin": "https://www.cardmarket.com"
-    }
-    
-    try:
-        # Scarichiamo l'immagine dal server di Cardmarket
-        img_resp = std_requests.get(url, headers=headers, timeout=10)
-        
-        # Se ha successo, la restituiamo direttamente al frontend come se fossimo noi il server dell'immagine!
-        if img_resp.status_code == 200:
-            return Response(content=img_resp.content, media_type=img_resp.headers.get("Content-Type", "image/jpeg"))
-        else:
-            raise HTTPException(status_code=img_resp.status_code, detail="Impossibile scaricare l'immagine")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # --- JOB SCHEDULATO CON INTERVALLO UTENTE ---
 def job_check_prices():
