@@ -21,16 +21,12 @@ from pydantic import BaseModel, Field
 
 from catalog import card_options, catalog_lock, fetch_catalog, validate_path
 from pricing import CardmarketReader, CONDITIONS, LANGUAGES, filtered_url, product_url
-import random
-import re
-from bs4 import BeautifulSoup
-from curl_cffi import requests as cffi_requests
 
 log = logging.getLogger("pricebot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")
 MIN_GAP = max(10, int(os.getenv("PRICE_MIN_GAP_SECONDS", "30")))
-CACHE_SECONDS = max(300, int(os.getenv("PRICE_CACHE_SECONDS", "900")))
+CACHE_SECONDS = max(300, int(os.getenv("PRICE_CACHE_SECONDS", "300")))
 COLLECTION_INTERVAL = max(3600, int(os.getenv("COLLECTION_INTERVAL_SECONDS", "86400")))
 BLOCK_COOLDOWN = max(300, int(os.getenv("BLOCK_COOLDOWN_SECONDS", "1800")))
 stop_event = threading.Event()
@@ -184,13 +180,13 @@ class Login(BaseModel):
 
 class Register(Login):
     bottoken: str = Field(default="", max_length=200)
-    checkinterval: int = Field(default=15, ge=5, le=1440)
+    checkinterval: int = Field(default=5, ge=5, le=1440)
 
 
 class Settings(BaseModel):
     bot_token: str | None = Field(default=None, max_length=200)
     chat_id: str = Field(min_length=1, max_length=80)
-    check_interval: int = Field(default=15, ge=5, le=1440)
+    check_interval: int = Field(default=5, ge=5, le=1440)
 
 
 class Selection(BaseModel):
@@ -310,252 +306,18 @@ def schedule_due(c, now):
         """, (CACHE_SECONDS, COLLECTION_INTERVAL, now))
 
 
-# --- Scraping legacy recuperato da app.py ---
-def parse_prezzo(prezzo_str):
-    if not prezzo_str or prezzo_str == "N/D":
-        return None
-
-    try:
-        pulito = prezzo_str.replace("€", "").replace(".", "").replace(",", ".").strip()
-        return float(pulito)
-    except Exception:
-        return None
-
-
-def scrape_card_data(url, max_retries=3):
-    identities = [
-        {
-            "name": "safari-main",
-            "impersonate": "safari15_5",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "max-age=0",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
-            }
-        },
-        {
-            "name": "chrome-fallback",
-            "impersonate": "chrome120",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "max-age=0",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-        }
-    ]
-
-    last_status = None
-    retry_after = None
-
-    for attempt in range(max_retries):
-        try:
-            identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
-
-            time.sleep(random.uniform(1.2, 3.2))
-
-            cache_buster = random.randint(1000000, 9999999)
-            separator = "&" if "?" in url else "?"
-            url_busted = f"{url}{separator}nocache={cache_buster}"
-
-            response = cffi_requests.get(
-                url_busted,
-                impersonate=identity["impersonate"],
-                headers=identity["headers"],
-                timeout=18
-            )
-
-            last_status = response.status_code
-
-            try:
-                retry_after = response.headers.get("Retry-After")
-            except Exception:
-                retry_after = None
-
-            if response.status_code in (403, 429):
-                time.sleep(random.uniform(4.0, 7.0))
-                continue
-
-            if response.status_code >= 500:
-                time.sleep(random.uniform(4.0, 7.0))
-                continue
-
-            html_text = response.text
-            soup = BeautifulSoup(html_text, "html.parser")
-
-            lowered = html_text.lower()
-            if any(marker in lowered for marker in (
-                "captcha",
-                "cf-challenge",
-                "challenge-platform",
-                "attention required",
-                "just a moment"
-            )):
-                return {
-                    "status": "blocked",
-                    "http_status": response.status_code,
-                    "retry_after": retry_after,
-                    "price": None
-                }
-
-            price = None
-            condition = "N/A"
-            language = "🌐"
-            image_url = ""
-
-            # --- 1. ESTRAZIONE IMMAGINE ---
-            img_meta = soup.find("meta", property="og:image")
-            if img_meta and img_meta.get("content"):
-                image_url = img_meta["content"]
-
-            if not image_url:
-                img_tag = soup.select_one(".image-container img, .product-image img, .card-image img")
-                if img_tag:
-                    image_url = img_tag.get("src") or img_tag.get("data-src") or ""
-
-            if not image_url:
-                match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
-                if match:
-                    image_url = match.group(0)
-
-            if image_url.startswith("//"):
-                image_url = "https:" + image_url
-            elif image_url.startswith("/"):
-                image_url = "https://www.cardmarket.com" + image_url
-
-            # --- 2. ESTRAZIONE TABELLA PREZZO / LINGUA / CONDIZIONE ---
-            first_row = soup.select_one("div.row.article-row")
-
-            if first_row:
-                price_tag = first_row.select_one(
-                    ".price-container .color-primary, "
-                    ".color-primary.small, "
-                    "span.fw-bold, "
-                    ".font-weight-bold.color-primary"
-                )
-
-                if price_tag:
-                    price = parse_prezzo(price_tag.get_text(strip=True))
-
-                cond_tag = first_row.select_one("a.article-condition span.badge")
-                if cond_tag:
-                    condition = cond_tag.get_text(strip=True)
-
-                lang_tag = first_row.select_one(
-                    "span.icon[aria-label], "
-                    "span.icon[data-original-title], "
-                    "span.icon[onmouseover]"
-                )
-
-                if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
-
-                    if not lang_text and lang_tag.get("onmouseover"):
-                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
-                        if match:
-                            lang_text = match.group(1)
-
-                    lang_map = {
-                        "Inglese": "🇬🇧",
-                        "Italiano": "🇮🇹",
-                        "Francese": "🇫🇷",
-                        "Tedesco": "🇩🇪",
-                        "Spagnolo": "🇪🇸",
-                        "Portoghese": "🇵🇹",
-                        "Giapponese": "🇯🇵",
-                        "Coreano": "🇰🇷",
-                        "Cinese": "🇨🇳"
-                    }
-
-                    for k, v in lang_map.items():
-                        if k.lower() in lang_text.lower():
-                            language = v
-                            break
-
-            # --- 3. FALLBACK PREZZO ---
-            if price is None:
-                prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-
-                if not prezzo_tag:
-                    tabelle = soup.select("dd.col-6.col-xl-7")
-                    for tag in tabelle:
-                        if "€" in tag.get_text(" ", strip=True):
-                            prezzo_tag = tag
-                            break
-
-                if prezzo_tag:
-                    price = parse_prezzo(prezzo_tag.get_text(strip=True))
-
-            if price is not None:
-                return {
-                    "status": "ok",
-                    "price": price,
-                    "image": image_url,
-                    "condition": condition,
-                    "language": language,
-                    "http_status": response.status_code
-                }
-
-        except Exception:
-            pass
-
-        time.sleep(random.uniform(4.5, 8.5))
-
-    if last_status in (403, 429):
-        return {
-            "status": "blocked",
-            "http_status": last_status,
-            "retry_after": retry_after,
-            "price": None
-        }
-
-    return {
-        "status": "error",
-        "http_status": last_status,
-        "price": None
-    }
-
-
-def fetch_price_with_cffi(url, language, condition, variant):
-    """
-    Wrapper compatibile con il worker di app2.py.
-
-    app2.py si aspetta:
-    - status: ok / blocked / error
-    - price_cents: int, se status == ok
-    - message: str
-    - retry_after e http_status opzionali se blocked
-    """
-    scraped = scrape_card_data(url)
-
-    if scraped.get("status") == "blocked":
-        return {
-            "status": "blocked",
-            "message": "Cardmarket ha limitato o bloccato la richiesta.",
-            "http_status": scraped.get("http_status"),
-            "retry_after": scraped.get("retry_after")
-        }
-
-    if scraped.get("status") != "ok" or scraped.get("price") is None:
-        return {
-            "status": "error",
-            "message": "Recupero non riuscito. Nuovo tentativo programmato.",
-            "http_status": scraped.get("http_status")
-        }
-
-    price = float(scraped["price"])
-
-    return {
-        "status": "ok",
-        "price_cents": int(round(price * 100)),
-        "message": f"Prezzo trovato: {price:.2f} €",
-        "http_status": scraped.get("http_status")
-    }
+def queue_price_notification(c, entry, cents, url):
+    """Record the initial observation or a change in the same DB transaction."""
+    previous = entry["notified_cents"]
+    if previous == cents:
+        return
+    title = "Tracciamento attivato" if previous is None else "Cambio prezzo"
+    price = f"Prezzo iniziale: {cents/100:.2f} €" if previous is None else f"{previous/100:.2f} € → {cents/100:.2f} €"
+    msg = (f"{title} · {entry['name']} #{entry['number']}\n{entry['set_name']}\n"
+           f"{LANGUAGES[entry['language']][1]} · {entry['condition']} esatta · {entry['variant']}\n"
+           f"{price}\nMinimo verificato nella pagina, spedizione esclusa.\n{url}")
+    c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (entry["user_id"], entry["id"], msg))
+    c.execute("UPDATE entries SET notified_cents=? WHERE id=?", (cents, entry["id"]))
 
 
 def worker_step():
@@ -571,15 +333,22 @@ def worker_step():
             return False
         c.execute("UPDATE worker_state SET lease_until=?,next_request=? WHERE id=1", (now+180, now+MIN_GAP))
     q = dict(quote)
-    
     try:
-        result = fetch_price_with_cffi(q["url"], q["language"], q["condition"], q["variant"])
+        result = reader.fetch(q["url"], q["language"], q["condition"], q["variant"])
     except Exception as exc:
         # Do not log request URLs with credentials or raw page contents.
         log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])
-        result = {"status": "error", "message": "Recupero non riuscito. Nuovo tentativo programmato."}
-        
+        if isinstance(exc, requests.Timeout):
+            reason = "Cardmarket non ha risposto entro il tempo massimo."
+        elif isinstance(exc, requests.ConnectionError):
+            reason = "Connessione a Cardmarket non riuscita."
+        elif isinstance(exc, requests.HTTPError) and exc.response is not None:
+            reason = f"Cardmarket ha risposto HTTP {exc.response.status_code}."
+        else:
+            reason = "Errore durante il recupero da Cardmarket."
+        result = {"status": "error", "message": reason + " Nuovo tentativo programmato."}
     now = time.time()
+    log.info("Price result: quote=%s status=%s http=%s", q["key"][:10], result["status"], result.get("http_status", "-"))
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         state = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
@@ -589,13 +358,7 @@ def worker_step():
                       (cents, now, now, result["message"], now+CACHE_SECONDS, q["key"]))
             c.execute("UPDATE worker_state SET strikes=0,blocked_until=0 WHERE id=1")
             for e in c.execute("SELECT * FROM entries WHERE quote_key=? AND tracked=1", (q["key"],)).fetchall():
-                if e["notified_cents"] is not None and e["notified_cents"] != cents:
-                    msg = (f"Cambio prezzo · {e['name']} #{e['number']}\n{e['set_name']}\n"
-                           f"{LANGUAGES[e['language']][1]} · {e['condition']} esatta · {e['variant']}\n"
-                           f"{e['notified_cents']/100:.2f} € → {cents/100:.2f} €\n"
-                           f"Minimo verificato nella pagina, spedizione esclusa.\n{q['url']}")
-                    c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (e["user_id"], e["id"], msg))
-                c.execute("UPDATE entries SET notified_cents=? WHERE id=?", (cents, e["id"]))
+                queue_price_notification(c, e, cents, q["url"])
         else:
             delay = min(86400, CACHE_SECONDS * 2**min(q["failures"], 6))
             if result["status"] == "blocked":
@@ -630,6 +393,8 @@ def send_outbox():
         body = response.json()
         success = response.ok and body.get("ok") is True
         retry = int((body.get("parameters") or {}).get("retry_after", 0))
+        log.info("Telegram event=%s delivered=%s http=%s code=%s", row["id"], success,
+                 response.status_code, body.get("error_code", "-"))
     except (requests.RequestException, ValueError, TypeError):
         log.warning("Telegram delivery failed for event %s", row["id"])
     with db() as c:
@@ -658,6 +423,9 @@ async def lifespan(app):
     if os.getenv("RUN_WORKER", "1") == "1":
         thread = threading.Thread(target=worker_loop, daemon=True, name="price-worker")
         thread.start()
+        log.info("Price worker started: cache=%ss minimum_gap=%ss", CACHE_SECONDS, MIN_GAP)
+    else:
+        log.warning("Price worker disabled by RUN_WORKER")
     yield
     stop_event.set()
     if thread:
@@ -786,7 +554,7 @@ def save_entry(data, user, entry_id=None):
         ensure_quote(c, data, key, url, variant)
         request_quote(c, key)
         q = c.execute("SELECT * FROM quotes WHERE key=?", (key,)).fetchone()
-        baseline = old["notified_cents"] if old and old["quote_key"] == key and old["tracked"] and data.tracked else q["price_cents"]
+        baseline = old["notified_cents"] if old and old["quote_key"] == key and old["tracked"] and data.tracked else None
         fields = (key, data.catalog_id, data.catalog_lang, data.option_id, meta["name"], meta["set_name"], meta["number"], meta["image"], url,
                   data.language, data.condition, variant, data.quantity, int(data.tracked), baseline)
         if entry_id:
@@ -798,6 +566,9 @@ def save_entry(data, user, entry_id=None):
             cur = c.execute("""INSERT INTO entries(quote_key,catalog_id,catalog_lang,option_id,name,set_name,number,image,url,
                 language,condition,variant,quantity,tracked,notified_cents,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (*fields, user["id"], time.time()))
             entry_id = cur.lastrowid
+        if data.tracked and q["status"] == "ok" and q["checked_at"] and time.time()-q["checked_at"] < CACHE_SECONDS:
+            entry = c.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
+            queue_price_notification(c, entry, q["price_cents"], url)
     return {"status": "saved", "id": entry_id}
 
 

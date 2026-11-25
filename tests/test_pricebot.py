@@ -100,7 +100,8 @@ class IntegrationTests(unittest.TestCase):
             data = self.client.get('/api/entries', headers=self.headers).json()
             self.assertEqual(data['total_value'], 25)
             with backend.db() as c:
-                self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
+                self.assertIn("Prezzo iniziale: 12.50", c.execute("SELECT message FROM outbox").fetchone()[0])
             self.client.post('/api/collection/refresh', headers=self.headers)
             backend.worker_step()
             self.assertEqual(fetch.call_count, 1, "cache and rate gate must not be bypassed")
@@ -108,9 +109,36 @@ class IntegrationTests(unittest.TestCase):
         with patch.object(backend.reader, "fetch", return_value={"status": "ok", "price_cents": 1000, "message": "verified"}):
             backend.worker_step()
         with backend.db() as c:
-            self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
-            self.assertIn("12.50 € → 10.00 €", c.execute("SELECT message FROM outbox").fetchone()[0])
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 2)
+            self.assertIn("12.50 € → 10.00 €", c.execute("SELECT message FROM outbox ORDER BY id DESC").fetchone()[0])
         self.assertEqual(self.client.get('/api/entries', headers=self.headers).json()['total_value'], 20)
+
+    def test_initial_cached_price_and_delivery_then_change(self):
+        entry_id = self.add(tracked=False)
+        with patch.object(backend.reader, "fetch", return_value={"status": "ok", "price_cents": 1250, "message": "verified"}):
+            backend.worker_step()
+        payload = dict(url=URL, language="it", condition="NM", variant="normal", tracked=True, quantity=2, name="Furret")
+        self.assertEqual(self.client.put(f'/api/entries/{entry_id}', headers=self.headers, json=payload).status_code, 200)
+        # Saving the same tracking settings must not duplicate the initial alert.
+        self.client.put(f'/api/entries/{entry_id}', headers=self.headers, json=payload)
+        response = Mock(ok=True)
+        response.json.return_value = {"ok": True}
+        with patch.object(backend.requests, 'post', return_value=response) as send:
+            backend.send_outbox()
+            backend.send_outbox()
+            self.assertEqual(send.call_count, 1)
+            self.assertIn('Prezzo iniziale: 12.50', send.call_args.kwargs['json']['text'])
+            self.allow_next()
+            with patch.object(backend.reader, "fetch", return_value={"status": "ok", "price_cents": 1250, "message": "verified"}):
+                backend.worker_step()
+            backend.send_outbox()
+            self.assertEqual(send.call_count, 1)
+            self.allow_next()
+            with patch.object(backend.reader, "fetch", return_value={"status": "ok", "price_cents": 1000, "message": "verified"}):
+                backend.worker_step()
+            backend.send_outbox()
+            self.assertEqual(send.call_count, 2)
+            self.assertIn('12.50 € → 10.00 €', send.call_args.kwargs['json']['text'])
 
     def test_block_global_persistent_cooldown_preserves_last_price(self):
         self.add()
@@ -125,7 +153,7 @@ class IntegrationTests(unittest.TestCase):
         with backend.db() as c:
             self.assertGreater(c.execute("SELECT blocked_until FROM worker_state").fetchone()[0], time.time()+7190)
             self.assertEqual(c.execute("SELECT price_cents FROM quotes WHERE language='it'").fetchone()[0], 900)
-            self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
         backend.init_db()
         self.assertFalse(backend.worker_step(), "restart must not clear cooldown")
 
@@ -140,7 +168,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(data['entries'][0]['quote']['price'], 9)
         self.assertEqual(data['stale_prices'], 1)
         with backend.db() as c:
-            self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 1)
 
     def test_shared_cache_across_users_and_no_notifications_for_owned_only(self):
         self.add(tracked=False)
@@ -211,7 +239,7 @@ class MigrationTests(unittest.TestCase):
                     CREATE TABLE watchlist(id INTEGER PRIMARY KEY,user_id TEXT,url TEXT,last_price REAL,image_url TEXT,condition TEXT,language TEXT);
                     CREATE TABLE collection_cards(id INTEGER PRIMARY KEY,user_id TEXT,url TEXT,quantity INTEGER,card_name TEXT,set_name TEXT,card_number TEXT,last_price REAL);
                     INSERT INTO users VALUES ('old','token','123',5,'2026','hash');''')
-                c.execute("INSERT INTO watchlist VALUES (1,'old',?,123,'','NM','🇮🇹')", (URL,))
+                c.execute("INSERT INTO watchlist VALUES (1,'old',?,123,'','NM','ðŸ‡®ðŸ‡¹')", (URL,))
                 c.execute("INSERT INTO collection_cards VALUES (1,'old',?,3,'Furret','Darkness Ablaze','136',123)", (URL,))
             c.close()
             with patch.object(backend, 'DB_PATH', path):
