@@ -1,0 +1,56 @@
+import unittest
+from unittest.mock import patch
+from flaresolverr_reader import FlareSolverrReader, ReaderError
+
+URL = 'https://www.cardmarket.com/it/Pokemon/Products/Singles/30th-Celebration/Rayquaza-EX-30CDRX-85?language=5&minCondition=2'
+HTML = '''<meta property="og:image" content="https://static.cardmarket.com/card.jpg"><div class="article-row"><div class="product-attributes"><a class="article-condition"><span class="badge">NM</span></a><span aria-label="Italiano"></span></div><div class="price-container"><span class="color-primary">22,00 €</span></div></div>'''
+
+class ReaderTests(unittest.TestCase):
+    def setUp(self):
+        self.reader = FlareSolverrReader('http://127.0.0.1:8191')
+        self.addCleanup(lambda: setattr(self.reader, 'session', None))
+
+    def test_session_reused_and_listing_metadata_preserved(self):
+        with patch.object(self.reader, 'command', side_effect=[{'session': 'anonymous'}, {},
+                {'solution': {'url': URL, 'status': 200, 'response': HTML}},
+                {'solution': {'url': URL, 'status': 200, 'response': HTML}}]) as command:
+            result = self.reader.read(URL)
+            self.assertEqual(result['price'], 22.0)
+            self.assertEqual(result['language'], 'Italiano')
+            self.assertEqual(result['condition'], 'NM')
+            self.assertTrue(result['image'].endswith('card.jpg'))
+            self.reader.read(URL)
+            self.assertEqual([c.args[0] for c in command.call_args_list].count('sessions.create'), 1)
+            self.assertEqual(command.call_args_list[-1].kwargs['session'], 'anonymous')
+
+    def test_solver_200_without_offers_is_failure_with_cooldown(self):
+        with patch.object(self.reader, 'command', side_effect=[{'session': 'anonymous'}, {},
+                {'solution': {'url': URL, 'status': 200, 'response': 'Please login to continue'}}, {}]) as command:
+            with self.assertRaises(ReaderError):
+                self.reader.read(URL)
+            count = command.call_count
+            with self.assertRaises(ReaderError):
+                self.reader.read(URL)
+            self.assertEqual(command.call_count, count)
+            self.assertIsNone(self.reader.session)
+
+    def test_redirect_to_login_not_treated_as_product(self):
+        with patch.object(self.reader, 'command', side_effect=[{'session': 'anonymous'}, {},
+                {'solution': {'url': 'https://www.cardmarket.com/it/Pokemon/Login', 'status': 200, 'response': '<form></form>'}}, {}]):
+            with self.assertRaisesRegex(ReaderError, 'reindirizzato'):
+                self.reader.read(URL)
+
+    def test_unrelated_url_never_sent_to_solver(self):
+        with patch.object(self.reader, 'command') as command:
+            with self.assertRaises(ValueError):
+                self.reader.read('https://example.com/')
+            command.assert_not_called()
+
+    def test_service_unavailable_is_explicit_error(self):
+        import requests
+        with patch('flaresolverr_reader.requests.post', side_effect=requests.ConnectionError):
+            with self.assertRaisesRegex(ReaderError, 'non raggiungibile'):
+                self.reader.read(URL)
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!requirements.txt
+!app.py
+!cardmarket_reader.py
+!flaresolverr_reader.py
+!server_start.py

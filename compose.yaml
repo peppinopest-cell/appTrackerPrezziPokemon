@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    ports:
+      - "127.0.0.1:10000:10000"
+    environment:
+      PORT: "10000"
+    volumes:
+      - bot-data:/data
+    shm_size: 256mb
+volumes:
+  bot-data:

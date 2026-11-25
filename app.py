@@ -13,6 +13,11 @@ import re
 
 import requests as std_requests
 from curl_cffi import requests as cffi_requests
+from flaresolverr_reader import FlareSolverrReader, ReaderError
+import logging
+import asyncio
+
+solver_reader = FlareSolverrReader(os.environ['FLARESOLVERR_URL']) if os.getenv('FLARESOLVERR_URL') else None
 
 app = FastAPI(title="🔴 Poké Price Bot API")
 app.add_middleware(
@@ -93,6 +98,12 @@ def send_telegram_message(user_id, testo):
 
 # --- SCRAPING CORE ---
 def scrape_card_data(url, max_retries=3):
+    if solver_reader:
+        try:
+            return solver_reader.read(url)
+        except (ReaderError, ValueError) as exc:
+            logging.warning('Lettura Cardmarket tramite FlareSolverr: %s', exc)
+            return None
     identities = [
         {
             "name": "safari-main",
@@ -252,10 +263,12 @@ async def add_watch(item: WatchItem):
         raise HTTPException(status_code=400, detail="URL non valido. Assicurati che sia un link di Cardmarket.")
 
     active_users[item.user_id] = time.time()
-    data = scrape_card_data(final_url)
+    data = await asyncio.to_thread(scrape_card_data, final_url)
     nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
 
     if not data or data["price"] is None:
+        if solver_reader:
+            raise HTTPException(status_code=503, detail=solver_reader.last_error or 'Prezzo non verificabile tramite FlareSolverr. Riprova tra cinque minuti.')
         raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
 
     cur = conn.cursor()
@@ -347,10 +360,6 @@ def job_check_prices():
             
             if current_minute % interval != 0:
                 continue
-                
-            last_seen = active_users.get(user_id, 0)
-            if time.time() - last_seen > 120:
-                continue 
                 
             cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
             cards = cur.fetchall()
