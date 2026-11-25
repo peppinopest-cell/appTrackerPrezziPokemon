@@ -1,4 +1,4 @@
-name: Cardmarket additional free solvers diagnostic
+name: Cardmarket anonymous login reachability
 on:
   push:
     branches: [codex/cardmarket-browser-diagnostic]
@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        method: [byparr, flaresolverr, zendriver]
+        method: [byparr]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,7 +39,7 @@ jobs:
           python -m pip install zendriver
       - name: Read supplied product through solver
         if: matrix.method != 'zendriver'
-        run: python reader-candidate/check_solvers.py ${{ matrix.method }}
+        run: python reader-candidate/check_login_access.py
       - name: Read supplied product through Zendriver
         if: matrix.method == 'zendriver'
         run: xvfb-run -a python reader-candidate/check_solvers.py zendriver

@@ -24,6 +24,9 @@ def parse_page(html, url, http_status=200):
     soup = BeautifulSoup(html, 'html.parser')
     title = soup.title.get_text(' ', strip=True) if soup.title else ''
     result = {'http_status': http_status, 'title': title, 'price': None}
+    body = soup.get_text(' ', strip=True).lower().rstrip('.')
+    if body in ('please login to continue', 'please login and retry', 'please log in to continue'):
+        return {**result, 'status': 'auth_required'}
     if ('just a moment' in title.lower() or 'attention required' in title.lower()
             or soup.select_one('#challenge-form, #cf-challenge-running, .cf-turnstile')):
         return {**result, 'status': 'challenge_required'}
