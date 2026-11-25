@@ -1,4 +1,4 @@
-name: Cardmarket anonymous session continuity
+name: Cardmarket warm session and five minute verification
 on:
   push:
     branches: [codex/cardmarket-browser-diagnostic]
@@ -7,11 +7,11 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        method: [flaresolverr]
+        method: [curl_cffi, chromium, flaresolverr]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,30 +19,30 @@ jobs:
           python-version: '3.11'
       - name: Install parser
         run: python -m pip install beautifulsoup4 requests
-      - name: Start Byparr
-        if: matrix.method == 'byparr'
-        run: |
-          docker pull ghcr.io/thephaseless/byparr:latest
-          docker run -d --name reader-solver -p 127.0.0.1:8191:8191 --shm-size=1g ghcr.io/thephaseless/byparr:latest
-          docker inspect reader-solver --format '{{.Image}}'
-      - name: Start FlareSolverr
-        if: matrix.method == 'flaresolverr'
-        run: |
-          docker pull ghcr.io/flaresolverr/flaresolverr:latest
-          docker run -d --name reader-solver -p 127.0.0.1:8191:8191 --shm-size=1g -e LOG_LEVEL=warning ghcr.io/flaresolverr/flaresolverr:latest
-          docker inspect reader-solver --format '{{.Image}}'
-      - name: Install Zendriver
-        if: matrix.method == 'zendriver'
+      - name: Install HTTP transport
+        if: matrix.method == 'curl_cffi'
+        run: python -m pip install curl_cffi
+      - name: Install standard Chromium
+        if: matrix.method == 'chromium'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y xvfb xauth
-          python -m pip install zendriver
-      - name: Read supplied product through solver
-        if: matrix.method != 'zendriver'
-        run: python reader-candidate/check_anonymous_session.py
-      - name: Read supplied product through Zendriver
-        if: matrix.method == 'zendriver'
-        run: xvfb-run -a python reader-candidate/check_solvers.py zendriver
-      - name: Stop isolated container
-        if: always() && matrix.method != 'zendriver'
-        run: docker stop reader-solver || true
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Start isolated FlareSolverr
+        if: matrix.method == 'flaresolverr'
+        run: docker run -d --name reader-solver -p 127.0.0.1:8191:8191 --shm-size=1g -e LOG_LEVEL=warning ghcr.io/flaresolverr/flaresolverr:latest
+      - name: Verify anonymous HTTP session
+        if: matrix.method == 'curl_cffi'
+        run: python reader-candidate/check_warm_readers.py curl_cffi
+      - name: Verify anonymous standard browser
+        if: matrix.method == 'chromium'
+        run: xvfb-run -a python reader-candidate/check_warm_readers.py chromium
+      - name: Verify repeated five minute read
+        if: matrix.method == 'flaresolverr'
+        run: python reader-candidate/check_warm_readers.py flaresolverr
+      - name: Measure solver memory
+        if: always() && matrix.method == 'flaresolverr'
+        run: |
+          docker stats --no-stream --format '{{.MemUsage}}' reader-solver
+          docker stop reader-solver
