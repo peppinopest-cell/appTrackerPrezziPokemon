@@ -40,8 +40,8 @@ def parse_page(html, url, http_status=200):
         condition = condition_node.get_text(strip=True).upper() if condition_node else ''
         if CONDITIONS.get(condition, 100) > minimum:
             continue
-        attributes = ' '.join(str(n.get(a, '')) for n in row.select('.product-attributes [aria-label], .product-attributes [title], .product-attributes [data-original-title], .product-attributes [onmouseover], span.icon')
-                              for a in ('aria-label', 'title', 'data-original-title', 'onmouseover'))
+        attributes = ' '.join(str(n.get(a, '')) for n in row.select('.product-attributes [aria-label], .product-attributes [title], .product-attributes [data-original-title], .product-attributes [data-bs-original-title], .product-attributes [onmouseover]')
+                              for a in ('aria-label', 'title', 'data-original-title', 'data-bs-original-title', 'onmouseover'))
         if language is not None and not any(re.search(r'\b' + re.escape(v) + r'\b', attributes, re.I) for v in LANGUAGES[language]):
             continue
         price_node = row.select_one('.price-container .color-primary, .price-container .fw-bold, .price-container .font-weight-bold')
@@ -66,11 +66,16 @@ def read_browser(url):
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page(locale='it-IT')
-            response = page.goto(url, wait_until='domcontentloaded', timeout=45000)
+            status = {'http': 0}
+            def record_response(response):
+                if response.request.is_navigation_request() and response.frame == page.main_frame:
+                    status['http'] = response.status
+            page.on('response', record_response)
+            page.goto(url, wait_until='domcontentloaded', timeout=45000)
             try:
                 page.locator('div.article-row').first.wait_for(state='attached', timeout=15000)
             except Exception:
                 pass
-            return parse_page(page.content(), page.url, response.status if response else 0)
+            return parse_page(page.content(), page.url, status['http'])
         finally:
             browser.close()

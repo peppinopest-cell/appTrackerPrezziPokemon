@@ -1,4 +1,4 @@
-name: Cardmarket reader candidate diagnostic
+name: Cardmarket free methods diagnostic
 on:
   push:
     branches: [codex/cardmarket-browser-diagnostic]
@@ -7,14 +7,30 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        method: [camoufox, seleniumbase, persistent_chromium]
     steps:
       - uses: actions/checkout@v4
-      - name: Install standard browser
+      - name: Install shared dependencies
         run: |
-          python -m pip install playwright beautifulsoup4
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb xauth libgtk-3-0t64 libasound2t64
+          python -m pip install beautifulsoup4
+      - name: Install Camoufox
+        if: matrix.method == 'camoufox'
+        run: |
+          python -m pip install camoufox
+          python -m camoufox fetch
+      - name: Install SeleniumBase
+        if: matrix.method == 'seleniumbase'
+        run: python -m pip install seleniumbase
+      - name: Install Chromium
+        if: matrix.method == 'persistent_chromium'
+        run: |
+          python -m pip install playwright
           python -m playwright install --with-deps chromium
-      - name: Verify parser
-        run: python reader-candidate/test_reader.py
-      - name: Read supplied product URL once
-        run: python reader-candidate/check_cloud.py
+      - name: Read supplied product
+        run: xvfb-run -a python reader-candidate/check_free_methods.py ${{ matrix.method }}
