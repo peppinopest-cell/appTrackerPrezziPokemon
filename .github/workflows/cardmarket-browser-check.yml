@@ -1,4 +1,4 @@
-name: Cardmarket standard browser diagnostic
+name: Cardmarket legacy transport diagnostic
 on:
   push:
     branches: [codex/cardmarket-browser-diagnostic]
@@ -12,7 +12,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install diagnostic browser
         run: |
-          python -m pip install playwright requests beautifulsoup4
-          python -m playwright install --with-deps chromium
+          python -m pip install cloudscraper==1.2.71 requests beautifulsoup4
       - name: Read one public product page
-        run: PYTHONPATH=. python scripts/check_cardmarket_browser.py
+        run: PYTHONPATH=. python scripts/check_legacy_cardmarket.py
