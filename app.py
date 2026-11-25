@@ -1,665 +1,431 @@
-"""Price Bot v2. Run a single Uvicorn process with persistent DB_PATH on Render."""
-import hashlib
-import hmac
-import json
-import logging
-import os
-import secrets
-import sqlite3
-import threading
-import time
-import uuid
-from contextlib import contextmanager, asynccontextmanager
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from pathlib import Path
-
-import requests
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from bs4 import BeautifulSoup
+from fastapi.responses import Response
+import sqlite3
+from datetime import datetime
+import schedule
+import time
+import random
+import threading
+import os
+import re
 
-from catalog import card_options, catalog_lock, fetch_catalog, validate_path
-from pricing import CardmarketReader, CONDITIONS, LANGUAGES, PROFILES, filtered_url, product_url
+import requests as std_requests
+from curl_cffi import requests as cffi_requests
 
-log = logging.getLogger("pricebot")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+app = FastAPI(title="🔴 Poké Price Bot API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
 DB_PATH = os.getenv("DB_PATH", "./watchlist_v4.db")
-MIN_GAP = max(10, int(os.getenv("PRICE_MIN_GAP_SECONDS", "30")))
-CACHE_SECONDS = max(300, int(os.getenv("PRICE_CACHE_SECONDS", "300")))
-COLLECTION_INTERVAL = max(3600, int(os.getenv("COLLECTION_INTERVAL_SECONDS", "86400")))
-BLOCK_COOLDOWN = max(300, int(os.getenv("BLOCK_COOLDOWN_SECONDS", "1800")))
-stop_event = threading.Event()
-reader = CardmarketReader()
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cur = conn.cursor()
 
+# Creazione tabelle aggiornate
+cur.execute('''CREATE TABLE IF NOT EXISTS users
+               (id TEXT PRIMARY KEY, bot_token TEXT, chat_id TEXT, check_interval INTEGER DEFAULT 5, created_at TEXT)''')
 
-@contextmanager
-def db():
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000")
+cur.execute('''CREATE TABLE IF NOT EXISTS watchlist 
+               (id INTEGER PRIMARY KEY, user_id TEXT, url TEXT, last_price REAL, created_at TEXT)''')
+
+# Migrazione: Aggiungo colonne immagine, condizione, lingua
+try:
+    cur.execute("ALTER TABLE watchlist ADD COLUMN image_url TEXT")
+except: pass
+try:
+    cur.execute("ALTER TABLE watchlist ADD COLUMN condition TEXT")
+except: pass
+try:
+    cur.execute("ALTER TABLE watchlist ADD COLUMN language TEXT")
+except: pass
+
+conn.commit()
+print("✅ Database inizializzato")
+
+job_lock = threading.Lock()
+active_users = {}
+
+# Pydantic Models
+class UserSettings(BaseModel):
+    user_id: str
+    bot_token: str
+    chat_id: str
+    check_interval: int
+
+class WatchItem(BaseModel):
+    user_id: str
+    card_url: str
+
+class MassImportItem(BaseModel):
+    user_id: str
+    urls: list[str]
+
+# --- FUNZIONI DI UTILITA' ---
+def parse_prezzo(prezzo_str):
+    if not prezzo_str or prezzo_str == "N/D":
+        return None
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        pulito = prezzo_str.replace("€", "").replace(".", "").replace(",", ".").strip()
+        return float(pulito)
+    except:
+        return None
 
-
-def stamp(ts):
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else None
-
-
-def init_db():
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    with db() as c:
-        c.execute("PRAGMA journal_mode=WAL")
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, bot_token TEXT, chat_id TEXT,
-            check_interval INTEGER DEFAULT 15, created_at TEXT, passwordhash TEXT, updatedat TEXT);
-        CREATE TABLE IF NOT EXISTS sessions (digest TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS catalog_cache (path TEXT PRIMARY KEY, body TEXT NOT NULL, expires REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS quotes (
-            key TEXT PRIMARY KEY, url TEXT NOT NULL, language TEXT NOT NULL, condition TEXT NOT NULL,
-            variant TEXT NOT NULL, price_cents INTEGER, checked_at REAL, attempted_at REAL,
-            status TEXT NOT NULL DEFAULT 'pending', message TEXT, requested INTEGER NOT NULL DEFAULT 0,
-            next_attempt REAL NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, quote_key TEXT, catalog_id TEXT,
-            catalog_lang TEXT, option_id TEXT, name TEXT NOT NULL, set_name TEXT NOT NULL DEFAULT '',
-            number TEXT NOT NULL DEFAULT '', image TEXT NOT NULL DEFAULT '', url TEXT NOT NULL,
-            language TEXT NOT NULL DEFAULT 'it', condition TEXT NOT NULL DEFAULT 'NM',
-            variant TEXT NOT NULL DEFAULT 'normal', quantity INTEGER NOT NULL DEFAULT 0,
-            tracked INTEGER NOT NULL DEFAULT 0, needs_review INTEGER NOT NULL DEFAULT 0,
-            notified_cents INTEGER, legacy_source TEXT UNIQUE, created_at REAL NOT NULL);
-        CREATE UNIQUE INDEX IF NOT EXISTS entries_user_quote ON entries(user_id, quote_key) WHERE quote_key IS NOT NULL;
-        CREATE TABLE IF NOT EXISTS worker_state (
-            id INTEGER PRIMARY KEY CHECK(id=1), blocked_until REAL NOT NULL DEFAULT 0,
-            next_request REAL NOT NULL DEFAULT 0, strikes INTEGER NOT NULL DEFAULT 0,
-            lease_until REAL NOT NULL DEFAULT 0);
-        INSERT OR IGNORE INTO worker_state(id) VALUES (1);
-        CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL,
-            entry_id INTEGER NOT NULL, message TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-            next_attempt REAL NOT NULL DEFAULT 0, sent_at REAL);
-        CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS price_attempts (id INTEGER PRIMARY KEY, quote_key TEXT NOT NULL,
-            profile TEXT NOT NULL, status TEXT NOT NULL, http_status INTEGER, created_at REAL NOT NULL);
-        """)
-        if "debug_notifications" not in {r[1] for r in c.execute("PRAGMA table_info(users)")}:
-            c.execute("ALTER TABLE users ADD COLUMN debug_notifications INTEGER NOT NULL DEFAULT 1")
-        if "profile_index" not in {r[1] for r in c.execute("PRAGMA table_info(worker_state)")}:
-            c.execute("ALTER TABLE worker_state ADD COLUMN profile_index INTEGER NOT NULL DEFAULT 0")
-        cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
-        for name in ("passwordhash", "updatedat"):
-            if name not in cols:
-                c.execute(f"ALTER TABLE users ADD COLUMN {name} TEXT")
-        # Leave original tables intact; old prices did not guarantee exact filters.
-        if not c.execute("SELECT 1 FROM migrations WHERE name='legacy-v1'").fetchone():
-            tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            for table in ("watchlist", "collection_cards"):
-                if table not in tables:
-                    continue
-                for raw in c.execute(f"SELECT * FROM {table}").fetchall():
-                    r = dict(raw)
-                    url = r.get("url") or ""
-                    name = r.get("card_name") or url.split("?")[0].split("/")[-1].replace("-", " ")
-                    c.execute("""INSERT OR IGNORE INTO entries
-                        (user_id,name,set_name,number,image,url,quantity,tracked,needs_review,legacy_source,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,1,?,?)""", (r["user_id"], name or "Carta importata", r.get("set_name") or "Importate",
-                        r.get("card_number") or "", r.get("image_url") or "", url,
-                        max(1, r.get("quantity") or 1) if table == "collection_cards" else 0,
-                        int(table == "watchlist"), f"{table}:{r['id']}", time.time()))
-            c.execute("INSERT INTO migrations(name) VALUES ('legacy-v1')")
-
-
-def hash_password(password):
-    salt = secrets.token_hex(16)
-    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000).hex()
-    return f"{salt}${hashed}"
-
-
-def verify_password(password, stored):
-    try:
-        salt, old = stored.split("$")
-        return hmac.compare_digest(old, hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000).hex())
-    except (ValueError, AttributeError):
-        return False
-
-
-def session_for(user_id):
-    token = secrets.token_urlsafe(32)
-    with db() as c:
-        c.execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
-        c.execute("INSERT INTO sessions VALUES (?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), user_id, time.time()+30*86400))
-    return {"userid": user_id, "token": token}
-
-
-def current_user(authorization: str = Header(default="")):
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Accedi per continuare.")
-    digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
-    with db() as c:
-        user = c.execute("SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.digest=? AND s.expires>?", (digest, time.time())).fetchone()
-    if not user:
-        raise HTTPException(401, "Sessione scaduta. Accedi di nuovo.")
-    return dict(user)
-
-
-def catalog_data(lang, kind, item_id=None):
-    path = validate_path(lang, kind, item_id)
-    with catalog_lock:
-        with db() as c:
-            cached = c.execute("SELECT * FROM catalog_cache WHERE path=?", (path,)).fetchone()
-        if cached and cached["expires"] > time.time():
-            return json.loads(cached["body"])
-        try:
-            body = fetch_catalog(path)
-        except HTTPException as e:
-            if cached and e.status_code == 503:
-                return json.loads(cached["body"])
-            raise
-        with db() as c:
-            c.execute("INSERT OR REPLACE INTO catalog_cache VALUES (?,?,?)", (path, json.dumps(body), time.time()+86400))
-        return body
-
-
-def mapped_options(card, lang):
-    options = card_options(card)
-    # TCGdex often only attaches marketplace IDs to English records. Western
-    # translations share the same set/card IDs; Japanese sets must never use this fallback.
-    if not options and lang in {"it", "fr", "de", "es", "pt"}:
-        try:
-            english = catalog_data("en", "cards", card["id"])
-            if english["set"]["id"] == card["set"]["id"] and str(english["localId"]) == str(card["localId"]):
-                options = card_options(english)
-        except HTTPException:
-            pass
-    return options
-
-
-class Login(BaseModel):
-    chatid: str = Field(min_length=1, max_length=80)
-    password: str = Field(min_length=1, max_length=256)
-
-
-class Register(Login):
-    bottoken: str = Field(default="", max_length=200)
-    checkinterval: int = Field(default=5, ge=5, le=1440)
-    debug_notifications: bool = True
-
-
-class Settings(BaseModel):
-    bot_token: str | None = Field(default=None, max_length=200)
-    chat_id: str = Field(min_length=1, max_length=80)
-    check_interval: int = Field(default=5, ge=5, le=1440)
-    debug_notifications: bool = True
-
-
-class Selection(BaseModel):
-    catalog_id: str | None = Field(default=None, max_length=100)
-    catalog_lang: str = "en"
-    option_id: str | None = Field(default=None, max_length=100)
-    url: str | None = Field(default=None, max_length=2000)
-    language: str = "it"
-    condition: str = "NM"
-    variant: str = "normal"
-
-
-class EntryInput(Selection):
-    quantity: int = Field(default=0, ge=0, le=100000)
-    tracked: bool = False
-    name: str = Field(default="", max_length=200)
-    set_name: str = Field(default="", max_length=200)
-    number: str = Field(default="", max_length=30)
-
-
-def resolve_selection(data):
-    metadata = {"name": getattr(data, "name", "") or "Carta Cardmarket", "set_name": getattr(data, "set_name", ""),
-                "number": getattr(data, "number", ""), "image": ""}
-    base = data.url or ""
-    variant = data.variant
-    if data.catalog_id:
-        card = catalog_data(data.catalog_lang, "cards", data.catalog_id)
-        metadata = {"name": card["name"], "set_name": card["set"]["name"], "number": str(card["localId"]),
-                    "image": card.get("image", "") + "/high.webp" if card.get("image") else ""}
-        if (data.language in {"ja", "ko"} or data.catalog_lang in {"ja", "ko"}) and data.language != data.catalog_lang:
-            raise HTTPException(422, "Per carte giapponesi o coreane scegli il catalogo della stessa lingua o collega la stampa manualmente.")
-        option = next((o for o in mapped_options(card, data.catalog_lang) if o["id"] == data.option_id), None)
-        if not option:
-            raise HTTPException(422, "Questa variante non ha un collegamento Cardmarket verificabile nel catalogo.")
-        base, variant = option["url"], option["variant"]
-    try:
-        url = filtered_url(base, data.language, data.condition, variant)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    # Includes exact condition and variant even if two finishes share a market URL.
-    key = hashlib.sha256(f"{url}|{variant}|exact:{data.condition}".encode()).hexdigest()
-    return key, url, variant, metadata
-
-
-def ensure_quote(c, data, key, url, variant):
-    c.execute("INSERT OR IGNORE INTO quotes(key,url,language,condition,variant) VALUES (?,?,?,?,?)",
-              (key, url, data.language, data.condition, variant))
-
-
-def request_quote(c, key):
-    c.execute("UPDATE quotes SET requested=1 WHERE key=? AND (checked_at IS NULL OR checked_at<=?)", (key, time.time()-CACHE_SECONDS))
-
-
-def quote_payload(row, gate=None):
-    r = dict(row)
-    now = time.time()
-    blocked = gate and gate["blocked_until"] > now
-    r.update(price=r["price_cents"] / 100 if r["price_cents"] is not None else None,
-             updated_at=stamp(r["checked_at"]), attempted_at=stamp(r["attempted_at"]),
-             stale=not r["checked_at"] or now-r["checked_at"] >= CACHE_SECONDS or r["status"] != "ok",
-             queued=bool(r["requested"]), retry_at=stamp(max(r["next_attempt"], gate["blocked_until"] if gate else 0)))
-    if blocked:
-        r["status"] = "blocked"
-        r["message"] = "Aggiornamenti in pausa: Cardmarket ha limitato l'accesso."
-    return r
-
-
-def entries_payload(user_id):
-    with db() as c:
-        gate = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
-        entries = c.execute("SELECT * FROM entries WHERE user_id=? ORDER BY id DESC", (user_id,)).fetchall()
-        result = []
-        total_cents = missing = stale = valued = 0
-        sets = {}
-        for raw in entries:
-            e = dict(raw)
-            q = c.execute("SELECT * FROM quotes WHERE key=?", (e["quote_key"],)).fetchone() if e["quote_key"] else None
-            e["quote"] = quote_payload(q, gate) if q else None
-            value = q["price_cents"] * e["quantity"] if q and q["price_cents"] is not None else None
-            e["value"] = value / 100 if value is not None else None
-            if e["quantity"]:
-                total_cents += value or 0
-                missing += int(value is None)
-                valued += int(value is not None)
-                stale += int(bool(e["quote"] and e["quote"]["stale"] and value is not None))
-                name = e["set_name"] or "Carte singole"
-                group = sets.setdefault(name, {"name": name, "value_cents": 0, "quantity": 0, "missing": 0, "valued": 0})
-                group["value_cents"] += value or 0
-                group["quantity"] += e["quantity"]
-                group["missing"] += int(value is None)
-                group["valued"] += int(value is not None)
-            result.append(e)
-    return {"entries": result, "total_value": total_cents/100 if valued or not missing else None, "missing_prices": missing,
-            "stale_prices": stale, "quantity": sum(e["quantity"] for e in result),
-            "sets": [{**s, "value": s["value_cents"]/100 if s["valued"] else None} for s in sets.values()],
-            "blocked_until": stamp(gate["blocked_until"]) if gate["blocked_until"] > time.time() else None,
-            "cache_seconds": CACHE_SECONDS, "collection_interval_seconds": COLLECTION_INTERVAL}
-
-
-def backoff_seconds(retry_after, now):
-    try:
-        return max(0, int(retry_after))
-    except (TypeError, ValueError):
-        try:
-            return max(0, parsedate_to_datetime(retry_after).timestamp()-now)
-        except (TypeError, ValueError, OverflowError):
-            return 0
-
-
-def schedule_due(c, now):
-    # One shared quote for all users and both lists. Polling the UI never schedules jobs.
-    c.execute("""UPDATE quotes SET requested=1 WHERE requested=0 AND EXISTS (
-        SELECT 1 FROM entries e JOIN users u ON u.id=e.user_id WHERE e.quote_key=quotes.key
-        AND e.needs_review=0 AND e.tracked=1
-        AND COALESCE(quotes.checked_at,0) + MAX(?, COALESCE(u.check_interval,5)*60) <= ?)
-        """, (CACHE_SECONDS, now))
-
-
-def queue_price_notification(c, entry, cents, url):
-    """Record the initial observation or a change in the same DB transaction."""
-    previous = entry["notified_cents"]
-    if previous == cents:
+def send_telegram_message(user_id, testo):
+    cur = conn.cursor()
+    cur.execute("SELECT bot_token, chat_id FROM users WHERE id=?", (user_id,))
+    user = cur.fetchone()
+    if not user or not user[0] or not user[1]:
         return
-    title = "Tracciamento attivato" if previous is None else "Cambio prezzo"
-    price = f"Prezzo iniziale: {cents/100:.2f} €" if previous is None else f"{previous/100:.2f} € → {cents/100:.2f} €"
-    msg = (f"{title} · {entry['name']} #{entry['number']}\n{entry['set_name']}\n"
-           f"{LANGUAGES[entry['language']][1]} · {entry['condition']} esatta · {entry['variant']}\n"
-           f"{price}\nMinimo verificato nella pagina, spedizione esclusa.\n{url}")
-    c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (entry["user_id"], entry["id"], msg))
-    c.execute("UPDATE entries SET notified_cents=? WHERE id=?", (cents, entry["id"]))
-
-
-def worker_step():
-    now = time.time()
-    with db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        schedule_due(c, now)
-        state = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
-        if max(state["blocked_until"], state["next_request"], state["lease_until"]) > now:
-            return False
-        quote = c.execute("SELECT * FROM quotes WHERE requested=1 AND next_attempt<=? ORDER BY COALESCE(attempted_at,0),key LIMIT 1", (now,)).fetchone()
-        if not quote:
-            return False
-        c.execute("UPDATE worker_state SET lease_until=?,next_request=? WHERE id=1", (now+180, now+MIN_GAP))
-    q = dict(quote)
-    profile = PROFILES[state["profile_index"] % len(PROFILES)]
+    
+    bot_token, chat_id = user[0], user[1]
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": testo}
     try:
-        reader.select_profile(state["profile_index"])
-        result = reader.fetch(q["url"], q["language"], q["condition"], q["variant"])
-    except Exception as exc:
-        # Do not log request URLs with credentials or raw page contents.
-        log.warning("Price fetch failed (%s), quote %s", type(exc).__name__, q["key"][:10])
-        if isinstance(exc, requests.Timeout):
-            reason = "Cardmarket non ha risposto entro il tempo massimo."
-        elif isinstance(exc, requests.ConnectionError):
-            reason = "Connessione a Cardmarket non riuscita."
-        elif isinstance(exc, requests.HTTPError) and exc.response is not None:
-            reason = f"Cardmarket ha risposto HTTP {exc.response.status_code}."
-        else:
-            reason = "Errore durante il recupero da Cardmarket."
-        result = {"status": "error", "message": reason + " Nuovo tentativo programmato."}
-    now = time.time()
-    log.info("Price result: quote=%s status=%s http=%s", q["key"][:10], result["status"], result.get("http_status", "-"))
-    with db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        state = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
-        c.execute("INSERT INTO price_attempts(quote_key,profile,status,http_status,created_at) VALUES (?,?,?,?,?)",
-                  (q["key"], profile, result["status"], result.get("http_status"), now))
-        c.execute("DELETE FROM price_attempts WHERE created_at<?", (now-30*86400,))
-        if result["status"] == "ok":
-            cents = result["price_cents"]
-            c.execute("UPDATE quotes SET price_cents=?,checked_at=?,attempted_at=?,status='ok',message=?,requested=0,next_attempt=?,failures=0 WHERE key=?",
-                      (cents, now, now, result["message"], now+CACHE_SECONDS, q["key"]))
-            c.execute("UPDATE worker_state SET strikes=0,blocked_until=0 WHERE id=1")
-            for e in c.execute("SELECT * FROM entries WHERE quote_key=? AND tracked=1", (q["key"],)).fetchall():
-                queue_price_notification(c, e, cents, q["url"])
-        else:
-            delay = min(86400, CACHE_SECONDS * 2**min(q["failures"], 6))
-            if result["status"] == "blocked":
-                delay = max(min(86400, BLOCK_COOLDOWN * 2**min(state["strikes"], 6)), backoff_seconds(result.get("retry_after"), now))
-                c.execute("UPDATE worker_state SET blocked_until=?,strikes=strikes+1 WHERE id=1", (now+delay,))
-                log.warning("Cardmarket paused for %d seconds (HTTP %s)", delay, result.get("http_status", "challenge"))
-                # A rate limit is independent of the browser. Only change profile
-                # after an access block, and never before the persisted cooldown.
-                if result.get("http_status") != 429:
-                    c.execute("UPDATE worker_state SET profile_index=(profile_index+1)%? WHERE id=1", (len(PROFILES),))
-            elif result["status"] == "auth_required":
-                delay = max(delay, BLOCK_COOLDOWN)
-            c.execute("UPDATE quotes SET status=?,message=?,attempted_at=?,next_attempt=?,failures=failures+1 WHERE key=?",
-                      (result["status"], result["message"], now, now+delay, q["key"]))
-            # A detail viewed once must not retry forever after the user leaves it.
-            c.execute("""UPDATE quotes SET requested=0 WHERE key=? AND NOT EXISTS
-                (SELECT 1 FROM entries WHERE quote_key=quotes.key AND (tracked=1 OR quantity>0))""", (q["key"],))
-        c.execute("UPDATE worker_state SET lease_until=0,next_request=? WHERE id=1", (now+MIN_GAP,))
-        counts = c.execute("SELECT COUNT(*) attempts, SUM(status='blocked') blocks, SUM(status='auth_required') auth FROM price_attempts WHERE quote_key=?", (q["key"],)).fetchone()
-        next_profile = PROFILES[c.execute("SELECT profile_index FROM worker_state WHERE id=1").fetchone()[0] % len(PROFILES)]
-        for entry in c.execute("SELECT e.* FROM entries e JOIN users u ON u.id=e.user_id WHERE e.quote_key=? AND e.tracked=1 AND u.debug_notifications=1", (q["key"],)).fetchall():
-            message = (f"Test controllo · {entry['name']}\nProfilo: {profile}\n"
-                       f"Esito: {result['status']} · HTTP {result.get('http_status', '-')}\n"
-                       f"Controlli ultimi 30 giorni: {counts['attempts']} · Blocchi: {counts['blocks'] or 0} · HTTP 401: {counts['auth'] or 0}\n"
-                       f"{result['message']}\n")
-            if result['status'] != 'ok':
-                message += f"Prossimo tentativo non prima di {stamp(now+delay)} · Profilo: {next_profile}"
-            c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (entry['user_id'], entry['id'], message))
-    return True
+        std_requests.post(url, json=payload, timeout=10)
+    except:
+        pass
 
+# --- SCRAPING CORE ---
+def scrape_card_data(url, max_retries=3):
+    identities = [
+        {
+            "name": "safari-main",
+            "impersonate": "safari15_5",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
+            }
+        },
+        {
+            "name": "chrome-fallback",
+            "impersonate": "chrome120",
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "max-age=0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        }
+    ]
 
-def send_outbox():
-    now = time.time()
-    with db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        row = c.execute("""SELECT o.*,u.bot_token,u.chat_id FROM outbox o JOIN users u ON u.id=o.user_id
-            JOIN entries e ON e.id=o.entry_id AND e.tracked=1
-            WHERE o.sent_at IS NULL AND o.next_attempt<=? AND COALESCE(u.bot_token,'')!=''
-            ORDER BY o.id LIMIT 1""", (now,)).fetchone()
-        if not row:
-            return
-        c.execute("UPDATE outbox SET next_attempt=? WHERE id=?", (now+120, row["id"]))
-    success = False
-    retry = 0
-    try:
-        response = requests.post(f"https://api.telegram.org/bot{row['bot_token']}/sendMessage",
-                                 json={"chat_id": row["chat_id"], "text": row["message"], "disable_web_page_preview": True}, timeout=(5, 15))
-        body = response.json()
-        success = response.ok and body.get("ok") is True
-        retry = int((body.get("parameters") or {}).get("retry_after", 0))
-        log.info("Telegram event=%s delivered=%s http=%s code=%s", row["id"], success,
-                 response.status_code, body.get("error_code", "-"))
-    except (requests.RequestException, ValueError, TypeError):
-        log.warning("Telegram delivery failed for event %s", row["id"])
-    with db() as c:
-        if success:
-            c.execute("UPDATE outbox SET sent_at=? WHERE id=?", (time.time(), row["id"]))
-        else:
-            delay = max(retry, min(86400, 60*2**min(row["attempts"], 10)))
-            c.execute("UPDATE outbox SET attempts=attempts+1,next_attempt=? WHERE id=?", (time.time()+delay, row["id"]))
-
-
-def worker_loop():
-    while not stop_event.is_set():
+    for attempt in range(max_retries):
         try:
-            worker_step()
-            send_outbox()
-        except Exception:
-            log.exception("Worker iteration failed")
-        stop_event.wait(2)
+            identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
+            time.sleep(random.uniform(1.2, 3.2))
 
+            cache_buster = random.randint(1000000, 9999999)
+            separator = "&" if "?" in url else "?"
+            url_busted = f"{url}{separator}nocache={cache_buster}"
 
-@asynccontextmanager
-async def lifespan(app):
-    init_db()
-    stop_event.clear()
-    thread = None
-    if os.getenv("RUN_WORKER", "1") == "1":
-        thread = threading.Thread(target=worker_loop, daemon=True, name="price-worker")
-        thread.start()
-        log.info("Price worker started: cache=%ss minimum_gap=%ss", CACHE_SECONDS, MIN_GAP)
-    else:
-        log.warning("Price worker disabled by RUN_WORKER")
-    yield
-    stop_event.set()
-    if thread:
-        thread.join(timeout=2)
+            response = cffi_requests.get(
+                url_busted,
+                impersonate=identity["impersonate"],
+                headers=identity["headers"],
+                timeout=18
+            )
 
+            if response.status_code == 403:
+                time.sleep(random.uniform(4.0, 7.0))
+                continue
 
-app = FastAPI(title="Price Bot · Catalogo e collezione", lifespan=lifespan)
-origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081").split(",")
-app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in origins], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+            soup = BeautifulSoup(response.text, "html.parser")
+            html_text = response.text
+            
+            price = None
+            condition = "N/A"
+            language = "🌐"
+            image_url = ""
 
+                       # --- 1. ESTRAZIONE IMMAGINE (Nuovo metodo Anti-Blocco) ---
+            image_url = ""
+            
+            # Tentativo 1: Il tag meta ufficiale og:image per i social network (il più affidabile)
+            img_meta = soup.find('meta', property='og:image')
+            if img_meta and img_meta.get('content'):
+                image_url = img_meta['content']
+                
+            # Tentativo 2: Cerca qualsiasi immagine dentro il contenitore principale della carta
+            if not image_url:
+                img_tag = soup.select_one('.image-container img, .product-image img, .card-image img')
+                if img_tag:
+                    # Alcuni siti usano data-src per il caricamento pigro, altri src
+                    image_url = img_tag.get('src') or img_tag.get('data-src') or ""
+                    
+            # Tentativo 3: Regex drastica per trovare qualunque cosa finisca con .jpg o .png e abbia "img/" e "Products"
+            if not image_url:
+                match = re.search(r'https?://[^"]+/img/[^"]+/Products/[^"]+\.(?:jpg|png)', html_text)
+                if match:
+                    image_url = match.group(0)
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": 2}
+            # Normalizzazione (Se manca https:)
+            if image_url.startswith("//"):
+                image_url = "https:" + image_url
+            elif image_url.startswith("/"):
+                image_url = "https://www.cardmarket.com" + image_url
 
+            # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
+            first_row = soup.select_one("div.row.article-row")
+            if first_row:
+                # A. Prezzo
+                price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary")
+                if price_tag:
+                    price = parse_prezzo(price_tag.get_text(strip=True))
 
-@app.post("/auth/register")
-def register(data: Register):
-    if len(data.password.strip()) < 8:
-        raise HTTPException(422, "Usa una password di almeno 8 caratteri.")
-    with db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        if c.execute("SELECT 1 FROM users WHERE chat_id=?", (data.chatid.strip(),)).fetchone():
-            raise HTTPException(409, "Chat ID già registrato.")
-        uid = "user_" + uuid.uuid4().hex[:16]
-        c.execute("INSERT INTO users(id,bot_token,chat_id,check_interval,created_at,passwordhash) VALUES (?,?,?,?,?,?)",
-                  (uid, data.bottoken.strip(), data.chatid.strip(), data.checkinterval, stamp(time.time()), hash_password(data.password.strip())))
-        c.execute("UPDATE users SET debug_notifications=? WHERE id=?", (int(data.debug_notifications), uid))
-    return session_for(uid)
+                # B. Condizione
+                cond_tag = first_row.select_one("a.article-condition span.badge")
+                if cond_tag:
+                    condition = cond_tag.get_text(strip=True)
 
+                # C. Lingua (Estratta dagli attributi icon o onmouseover)
+                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
+                if lang_tag:
+                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
+                    
+                    if not lang_text and lang_tag.get("onmouseover"):
+                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
+                        if match:
+                            lang_text = match.group(1)
 
-@app.post("/auth/login")
-def login(data: Login):
-    with db() as c:
-        user = c.execute("SELECT * FROM users WHERE chat_id=?", (data.chatid.strip(),)).fetchone()
-    if not user or not verify_password(data.password.strip(), user["passwordhash"]):
-        raise HTTPException(401, "Chat ID o password non corretti.")
-    return session_for(user["id"])
+                    lang_map = {
+                        "Inglese": "🇬🇧",
+                        "Italiano": "🇮🇹",
+                        "Francese": "🇫🇷",
+                        "Tedesco": "🇩🇪",
+                        "Spagnolo": "🇪🇸",
+                        "Portoghese": "🇵🇹",
+                        "Giapponese": "🇯🇵",
+                        "Coreano": "🇰🇷",
+                        "Cinese": "🇨🇳"
+                    }
+                    for k, v in lang_map.items():
+                        if k.lower() in lang_text.lower():
+                            language = v
+                            break
 
+            # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
+            if price is None:
+                prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
+                if not prezzo_tag:
+                    tabelle = soup.select("dd.col-6.col-xl-7")
+                    for tag in tabelle:
+                        if "€" in tag.get_text(" ", strip=True):
+                            prezzo_tag = tag
+                            break
+                if prezzo_tag:
+                    price = parse_prezzo(prezzo_tag.get_text(strip=True))
 
-@app.post("/auth/logout")
-def logout(user=Depends(current_user), authorization: str = Header()):
-    with db() as c:
-        c.execute("DELETE FROM sessions WHERE digest=?", (hashlib.sha256(authorization[7:].encode()).hexdigest(),))
+            if price is not None:
+                return {"price": price, "image": image_url, "condition": condition, "language": language}
+
+        except Exception as e:
+            pass
+
+        time.sleep(random.uniform(4.5, 8.5))
+
+    return None
+
+# --- ENDPOINTS ---
+@app.get("/ping/{user_id}")
+async def ping_user(user_id: str):
+    active_users[user_id] = time.time()
     return {"status": "ok"}
 
-
-@app.get("/api/settings")
-def get_settings(user=Depends(current_user)):
-    return {"chat_id": user["chat_id"], "has_bot_token": bool(user["bot_token"]), "check_interval": user["check_interval"], "minimum_interval": CACHE_SECONDS//60,
-            "debug_notifications": bool(user["debug_notifications"])}
-
-
-@app.post("/api/telegram/test")
-def test_telegram(user=Depends(current_user)):
-    if not user["bot_token"]:
-        raise HTTPException(422, "Inserisci il bot token nelle impostazioni e salva.")
-    try:
-        response = requests.post(f"https://api.telegram.org/bot{user['bot_token']}/sendMessage",
-            json={"chat_id": user["chat_id"], "text": "Price Bot · Configurazione Telegram confermata. Riceverai il primo prezzo verificato delle carte tracciate e una nuova notifica quando cambia."},
-            timeout=(5, 15))
-        body = response.json()
-    except (requests.RequestException, ValueError):
-        raise HTTPException(502, "Telegram non raggiungibile. Impostazioni salvate; riprova il test.")
-    if response.ok and body.get("ok") is True:
-        return {"status": "sent", "message": "Configurazione confermata: messaggio consegnato a Telegram."}
-    code = body.get("error_code", response.status_code)
-    if code in (401, 404):
-        detail = "Bot token non valido. Copia il token completo da BotFather."
-    elif code == 403:
-        detail = "Il bot non può scriverti: apri la sua chat su Telegram, premi Avvia e verifica di non averlo bloccato."
-    elif code == 400:
-        detail = "Telegram non accetta la chat: verifica il Chat ID e premi Avvia nella chat del bot."
-    elif code == 429:
-        detail = "Telegram ha limitato gli invii. Attendi prima di riprovare."
-    else:
-        detail = f"Telegram non ha consegnato il messaggio (codice {code})."
-    raise HTTPException(502, detail)
-
-
-@app.put("/api/settings")
-def put_settings(data: Settings, user=Depends(current_user)):
-    with db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        if c.execute("SELECT 1 FROM users WHERE chat_id=? AND id!=?", (data.chat_id.strip(), user["id"])).fetchone():
-            raise HTTPException(409, "Questo Chat ID è già associato a un altro account.")
-        c.execute("UPDATE users SET bot_token=?,chat_id=?,check_interval=?,updatedat=? WHERE id=?",
-                  (data.bot_token.strip() if data.bot_token is not None else user["bot_token"], data.chat_id.strip(), data.check_interval, stamp(time.time()), user["id"]))
-        c.execute("UPDATE users SET debug_notifications=? WHERE id=?", (int(data.debug_notifications), user['id']))
+@app.post("/users/settings")
+async def save_settings(settings: UserSettings):
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO users (id, bot_token, chat_id, check_interval, created_at) VALUES (?, ?, ?, ?, ?)",
+                (settings.user_id, settings.bot_token, settings.chat_id, settings.check_interval, datetime.now().isoformat()))
+    conn.commit()
+    send_telegram_message(settings.user_id, "🔴 Poké Price Bot: Impostazioni salvate correttamente! Inizierò a tracciare le tue carte.")
     return {"status": "saved"}
 
+@app.get("/users/{user_id}/settings")
+async def get_settings(user_id: str):
+    cur = conn.cursor()
+    cur.execute("SELECT bot_token, chat_id, check_interval FROM users WHERE id=?", (user_id,))
+    row = cur.fetchone()
+    if row:
+        return {"bot_token": row[0], "chat_id": row[1], "check_interval": row[2]}
+    return {"bot_token": "", "chat_id": "", "check_interval": 5}
 
-@app.get("/api/catalog/{lang}/sets")
-def sets(lang: str, user=Depends(current_user)):
-    data = catalog_data(lang, "sets")
-    # Pocket is a different product line; no Cardmarket singles for the digital game.
-    return [s for s in data if not s["id"].startswith(("A", "B", "P-A", "P-B"))]
+# --- AGGIUNTA SINGOLA ---
+@app.post("/watch")
+async def add_watch(item: WatchItem):
+    final_url = item.card_url.strip()
 
+    if "cardmarket.com" not in final_url:
+        raise HTTPException(status_code=400, detail="URL non valido. Assicurati che sia un link di Cardmarket.")
 
-@app.get("/api/catalog/{lang}/sets/{set_id}")
-def one_set(lang: str, set_id: str, user=Depends(current_user)):
-    return catalog_data(lang, "sets", set_id)
+    active_users[item.user_id] = time.time()
+    data = scrape_card_data(final_url)
+    nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
 
+    if not data or data["price"] is None:
+        raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
 
-@app.get("/api/catalog/{lang}/cards/{card_id}")
-def one_card(lang: str, card_id: str, user=Depends(current_user)):
-    card = catalog_data(lang, "cards", card_id)
-    return {"id": card["id"], "name": card["name"], "localId": card["localId"], "image": card.get("image"),
-            "set": card["set"], "options": mapped_options(card, lang)}
+    cur = conn.cursor()
+    cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, condition, language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (item.user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), datetime.now().isoformat()))
+    conn.commit()
 
+    send_telegram_message(item.user_id, f"✅ {nome} aggiunta!\n🗣️ {data.get('language', '🌐')} | 🏷️ {data.get('condition', 'N/A')}\n💰 Prezzo iniziale: {data['price']}€")
+    time.sleep(random.uniform(2.5, 5.0))
+    
+    return {"status": "aggiunta", "id": cur.lastrowid, "prezzo": data["price"], "image": data["image"], "condition": data.get("condition"), "language": data.get("language")}
 
-@app.post("/api/quotes")
-def preview(data: Selection, user=Depends(current_user)):
-    key, url, variant, metadata = resolve_selection(data)
-    with db() as c:
-        ensure_quote(c, data, key, url, variant)
-        request_quote(c, key)
-        q = c.execute("SELECT * FROM quotes WHERE key=?", (key,)).fetchone()
-        gate = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
-    return {**quote_payload(q, gate), **metadata}
+# --- IMPORT MASSIVO CON CODA BACKGROUND ---
+def process_mass_import(user_id: str, urls: list[str]):
+    success_count = 0
+    for url in urls:
+        final_url = url.strip()
+        if "cardmarket.com" not in final_url:
+            continue
+            
+        data = scrape_card_data(final_url)
+        if data and data["price"] is not None:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM watchlist WHERE user_id=? AND url=?", (user_id, final_url))
+            if not cur.fetchone():
+                cur.execute("INSERT INTO watchlist (user_id, url, last_price, image_url, condition, language, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (user_id, final_url, data["price"], data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), datetime.now().isoformat()))
+                conn.commit()
+                success_count += 1
+        
+        time.sleep(random.uniform(10.0, 18.0))
+        
+    msg = f"📦 Import completato!\nAggiunte {success_count}/{len(urls)} carte al tracciamento."
+    if success_count < len(urls):
+        msg += "\n⚠️ Alcune carte non sono state caricate (possibile blocco di Cardmarket). Riprova."
+    send_telegram_message(user_id, msg)
 
+@app.post("/watch/mass")
+async def add_mass_watch(item: MassImportItem, background_tasks: BackgroundTasks):
+    active_users[item.user_id] = time.time()
+    background_tasks.add_task(process_mass_import, item.user_id, item.urls)
+    return {"status": "processing", "message": f"Importazione di {len(item.urls)} carte avviata. Riceverai un messaggio su Telegram al termine!"}
 
-@app.get("/api/quotes/{key}")
-def get_quote(key: str, user=Depends(current_user)):
-    with db() as c:
-        q = c.execute("SELECT * FROM quotes WHERE key=?", (key,)).fetchone()
-        gate = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
-    if not q:
-        raise HTTPException(404, "Prezzo non ancora richiesto.")
-    return quote_payload(q, gate)
+@app.get("/watchlist/{user_id}")
+async def get_watchlist(user_id: str):
+    cur = conn.cursor()
+    cur.execute("SELECT id, url, last_price, image_url, condition, language FROM watchlist WHERE user_id=? ORDER BY id DESC", (user_id,))
+    return [
+        {
+            "id": row[0], 
+            "nome": row[1].split('/')[-1].split('?')[0].replace('-', ' '), 
+            "url": row[1], 
+            "last_price": row[2], 
+            "image_url": row[3] or "",
+            "condition": row[4] or "N/A",
+            "language": row[5] or "🌐"
+        } for row in cur.fetchall()
+    ]
 
+@app.delete("/watch/{watch_id}")
+async def delete_watch(watch_id: int):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM watchlist WHERE id=?", (watch_id,))
+    conn.commit()
+    return {"status": "eliminata"}
 
-@app.get("/api/entries")
-def get_entries(user=Depends(current_user)):
-    return entries_payload(user["id"])
+@app.delete("/watchlist/{user_id}/clear")
+async def clear_watchlist(user_id: str):
+    cur = conn.cursor()
+    cur.execute("DELETE FROM watchlist WHERE user_id=?", (user_id,))
+    conn.commit()
+    return {"status": "svuotata"}
 
-
-def save_entry(data, user, entry_id=None):
-    if not data.tracked and not data.quantity:
-        raise HTTPException(422, "Attiva il tracciamento o indica almeno una copia posseduta.")
-    if data.tracked and not user["bot_token"]:
-        raise HTTPException(422, "Configura il bot Telegram nelle impostazioni prima di attivare le notifiche.")
-    key, url, variant, meta = resolve_selection(data)
-    with db() as c:
-        c.execute("BEGIN IMMEDIATE")
-        existing = c.execute("SELECT * FROM entries WHERE user_id=? AND quote_key=?", (user["id"], key)).fetchone()
-        old = None
-        if entry_id:
-            old = c.execute("SELECT * FROM entries WHERE id=? AND user_id=?", (entry_id, user["id"])).fetchone()
-            if not old:
-                raise HTTPException(404, "Carta non trovata.")
-            if existing and existing["id"] != entry_id:
-                raise HTTPException(409, "Questa carta con gli stessi filtri è già salvata. Modifica quella esistente.")
-        elif existing:
-            raise HTTPException(409, "Carta già presente con questi filtri. Aprila da Tracciate o Collezione per modificarla.")
-        ensure_quote(c, data, key, url, variant)
-        request_quote(c, key)
-        q = c.execute("SELECT * FROM quotes WHERE key=?", (key,)).fetchone()
-        baseline = old["notified_cents"] if old and old["quote_key"] == key and old["tracked"] and data.tracked else None
-        fields = (key, data.catalog_id, data.catalog_lang, data.option_id, meta["name"], meta["set_name"], meta["number"], meta["image"], url,
-                  data.language, data.condition, variant, data.quantity, int(data.tracked), baseline)
-        if entry_id:
-            c.execute("""UPDATE entries SET quote_key=?,catalog_id=?,catalog_lang=?,option_id=?,name=?,set_name=?,number=?,image=?,url=?,
-                language=?,condition=?,variant=?,quantity=?,tracked=?,notified_cents=?,needs_review=0 WHERE id=? AND user_id=?""", (*fields, entry_id, user["id"]))
-            if not data.tracked or old["quote_key"] != key:
-                c.execute("DELETE FROM outbox WHERE entry_id=? AND sent_at IS NULL", (entry_id,))
+@app.get("/proxy-image")
+async def proxy_image(url: str):
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="URL non valido")
+    
+    # Facciamo finta di essere un browser normale su Cardmarket
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.cardmarket.com/",
+        "Origin": "https://www.cardmarket.com"
+    }
+    
+    try:
+        # Scarichiamo l'immagine dal server di Cardmarket
+        img_resp = std_requests.get(url, headers=headers, timeout=10)
+        
+        # Se ha successo, la restituiamo direttamente al frontend come se fossimo noi il server dell'immagine!
+        if img_resp.status_code == 200:
+            return Response(content=img_resp.content, media_type=img_resp.headers.get("Content-Type", "image/jpeg"))
         else:
-            cur = c.execute("""INSERT INTO entries(quote_key,catalog_id,catalog_lang,option_id,name,set_name,number,image,url,
-                language,condition,variant,quantity,tracked,notified_cents,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (*fields, user["id"], time.time()))
-            entry_id = cur.lastrowid
-        if data.tracked and user['debug_notifications'] and (not old or not old['tracked'] or old['quote_key'] != key):
-            c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (user['id'], entry_id,
-                      f"Carta in controllo · {meta['name']}\n{LANGUAGES[data.language][1]} · {data.condition} · {variant}\n"
-                      "Riceverai il primo prezzo verificato, i cambi successivi e gli esiti diagnostici dei controlli."))
-        if data.tracked and q["status"] == "ok" and q["checked_at"] and time.time()-q["checked_at"] < CACHE_SECONDS:
-            entry = c.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
-            queue_price_notification(c, entry, q["price_cents"], url)
-    return {"status": "saved", "id": entry_id}
+            raise HTTPException(status_code=img_resp.status_code, detail="Impossibile scaricare l'immagine")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+# --- JOB SCHEDULATO CON INTERVALLO UTENTE ---
+def job_check_prices():
+    if not job_lock.acquire(blocking=False):
+        return
 
-@app.post("/api/entries")
-def add_entry(data: EntryInput, user=Depends(current_user)):
-    return save_entry(data, user)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, check_interval FROM users")
+        users = cur.fetchall()
+        
+        current_minute = datetime.now().minute
+        
+        for user_row in users:
+            user_id = user_row[0]
+            interval = user_row[1] or 5
+            
+            if current_minute % interval != 0:
+                continue
+                
+            last_seen = active_users.get(user_id, 0)
+            if time.time() - last_seen > 120:
+                continue 
+                
+            cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
+            cards = cur.fetchall()
+            
+            for card in cards:
+                watch_id, url, old_price = card
+                nome = url.split('/')[-1].split('?')[0].replace('-', ' ')
+                
+                data = scrape_card_data(url)
+                if data and data["price"] is not None:
+                    new_price = data["price"]
+                    if old_price is None or new_price != old_price:
+                        msg = f"🚨 AGGIORNAMENTO PREZZO!\n🃏 {nome}\n🗣️ {data.get('language', '🌐')} | 🏷️ {data.get('condition', 'N/A')}\n💶 Nuovo prezzo: {new_price}€ (era {old_price}€)\n🔗 {url}"
+                        send_telegram_message(user_id, msg)
+                        
+                        cur_update = conn.cursor()
+                        cur_update.execute("UPDATE watchlist SET last_price=?, image_url=?, condition=?, language=? WHERE id=?", 
+                                           (new_price, data["image"], data.get("condition", "N/A"), data.get("language", "🌐"), watch_id))
+                        conn.commit()
 
+                time.sleep(random.uniform(12.0, 22.0))
 
-@app.put("/api/entries/{entry_id}")
-def update_entry(entry_id: int, data: EntryInput, user=Depends(current_user)):
-    return save_entry(data, user, entry_id)
+    finally:
+        job_lock.release()
 
+def run_scheduler():
+    schedule.every(1).minutes.do(job_check_prices)
+    while True:
+        schedule.run_pending()
+        time.sleep(10)
 
-@app.delete("/api/entries/{entry_id}")
-def delete_entry(entry_id: int, user=Depends(current_user)):
-    with db() as c:
-        c.execute("DELETE FROM outbox WHERE entry_id=? AND user_id=?", (entry_id, user["id"]))
-        c.execute("DELETE FROM entries WHERE id=? AND user_id=?", (entry_id, user["id"]))
-    return {"status": "deleted"}
-
-
-@app.post("/api/collection/refresh")
-def refresh_collection(user=Depends(current_user)):
-    with db() as c:
-        for row in c.execute("SELECT quote_key FROM entries WHERE user_id=? AND quantity>0 AND needs_review=0", (user["id"],)).fetchall():
-            request_quote(c, row["quote_key"])
-    return {"message": "Aggiornamento richiesto. Cache e pause di Cardmarket vengono rispettate."}
-
+threading.Thread(target=run_scheduler, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
