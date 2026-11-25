@@ -2,6 +2,7 @@
 import atexit
 import json
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -53,12 +54,16 @@ class FlareSolverrReader:
                     import utils
                     from dtos import V1RequestBase
                     utils.get_current_platform()
-                    utils.get_user_agent()
                     memory_diagnostic('after_engine_initialize')
                     self.embedded_api = (flaresolverr_service, utils, V1RequestBase)
                 service, utils, request_type = self.embedded_api
                 memory_diagnostic('before_' + command)
                 data = utils.object_to_dict(service.controller_v1_endpoint(request_type({'cmd': command, **fields})))
+                if command == 'sessions.create' and data.get('status') == 'ok':
+                    # Populate the vendor cache from the browser we already opened.
+                    # get_user_agent() with no argument starts a throwaway browser.
+                    session, _ = service.SESSIONS_STORAGE.get(data['session'])
+                    utils.USER_AGENT = re.sub('HEADLESS', '', session.driver.execute_script('return navigator.userAgent'), flags=re.I)
                 memory_diagnostic('after_' + command)
             except Exception as exc:
                 raise ReaderError('Il motore FlareSolverr non ha completato la richiesta.') from exc
@@ -75,6 +80,24 @@ class FlareSolverrReader:
         if data.get('status') != 'ok':
             raise ReaderError('FlareSolverr non ha completato la lettura della pagina.')
         return data
+
+    def prime_anonymous_session(self, locale):
+        service, _, _ = self.embedded_api
+        session, _ = service.SESSIONS_STORAGE.get(self.session)
+        driver = session.driver
+        driver.set_page_load_timeout(self.timeout_ms / 1000)
+        driver.set_script_timeout(25)
+        # A text document establishes the correct origin without rendering a form.
+        driver.get('https://www.cardmarket.com/robots.txt')
+        result = driver.execute_async_script('''
+            const done = arguments[arguments.length - 1];
+            fetch(arguments[0], {credentials: 'include'})
+              .then(response => response.text().then(() => done({status: response.status})))
+              .catch(() => done({status: 0}));
+        ''', f'https://www.cardmarket.com/{locale}/Pokemon/Login')
+        memory_diagnostic('after_lightweight_entry')
+        if not isinstance(result, dict) or result.get('status') != 200:
+            raise ReaderError('Cardmarket ha rifiutato la preparazione della sessione anonima.')
 
     def close(self):
         with self.lock:
@@ -95,9 +118,12 @@ class FlareSolverrReader:
                     self.session = self.command('sessions.create')['session']
                     # This is a public anonymous entry page; no login is submitted.
                     locale = urlsplit(url).path.split('/')[1]
-                    self.command('request.get', session=self.session,
-                                 url=f'https://www.cardmarket.com/{locale}/Pokemon/Login',
-                                 maxTimeout=self.timeout_ms, disableMedia=True)
+                    if self.embedded:
+                        self.prime_anonymous_session(locale)
+                    else:
+                        self.command('request.get', session=self.session,
+                                     url=f'https://www.cardmarket.com/{locale}/Pokemon/Login',
+                                     maxTimeout=self.timeout_ms, disableMedia=True)
                 data = self.command('request.get', session=self.session, url=url,
                                     maxTimeout=self.timeout_ms, disableMedia=True)
                 solution = data.get('solution', {})

@@ -56,14 +56,31 @@ class ReaderTests(unittest.TestCase):
         import sys
         from types import SimpleNamespace
         reader = FlareSolverrReader('embedded')
-        service = SimpleNamespace(controller_v1_endpoint=lambda request: {'status': 'ok', 'session': 'test'})
         from unittest.mock import Mock
+        driver = Mock()
+        driver.execute_script.return_value = 'Chrome'
+        service = SimpleNamespace(controller_v1_endpoint=lambda request: {'status': 'ok', 'session': 'test'},
+                                  SESSIONS_STORAGE=SimpleNamespace(get=lambda session: (SimpleNamespace(driver=driver), False)))
         utils = SimpleNamespace(get_current_platform=Mock(), get_user_agent=Mock(), object_to_dict=lambda value: value)
         with patch.dict(sys.modules, {'flaresolverr_service': service, 'utils': utils, 'dtos': SimpleNamespace(V1RequestBase=lambda value: value)}), patch('flaresolverr_reader.requests.post') as post:
             self.assertEqual(reader.command('sessions.create')['session'], 'test')
             reader.command('sessions.list')
-            utils.get_user_agent.assert_called_once()
+            utils.get_user_agent.assert_not_called()
+            self.assertEqual(utils.USER_AGENT, 'Chrome')
             post.assert_not_called()
+
+    def test_lightweight_entry_does_not_render_login_form(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        reader = FlareSolverrReader('embedded')
+        reader.session = 'test'
+        self.addCleanup(lambda: setattr(reader, 'session', None))
+        driver = Mock()
+        driver.execute_async_script.return_value = {'status': 200}
+        reader.embedded_api = (SimpleNamespace(SESSIONS_STORAGE=SimpleNamespace(get=lambda session: (SimpleNamespace(driver=driver), False))), None, None)
+        reader.prime_anonymous_session('it')
+        driver.get.assert_called_once_with('https://www.cardmarket.com/robots.txt')
+        self.assertIn('fetch(', driver.execute_async_script.call_args.args[0])
 
 if __name__ == '__main__':
     unittest.main()
