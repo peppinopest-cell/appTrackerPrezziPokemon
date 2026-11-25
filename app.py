@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from catalog import card_options, catalog_lock, fetch_catalog, validate_path
-from pricing import CardmarketReader, CONDITIONS, LANGUAGES, filtered_url, product_url
+from pricing import CardmarketReader, CONDITIONS, LANGUAGES, PROFILES, filtered_url, product_url
 
 log = logging.getLogger("pricebot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -84,7 +84,13 @@ def init_db():
             entry_id INTEGER NOT NULL, message TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
             next_attempt REAL NOT NULL DEFAULT 0, sent_at REAL);
         CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS price_attempts (id INTEGER PRIMARY KEY, quote_key TEXT NOT NULL,
+            profile TEXT NOT NULL, status TEXT NOT NULL, http_status INTEGER, created_at REAL NOT NULL);
         """)
+        if "debug_notifications" not in {r[1] for r in c.execute("PRAGMA table_info(users)")}:
+            c.execute("ALTER TABLE users ADD COLUMN debug_notifications INTEGER NOT NULL DEFAULT 1")
+        if "profile_index" not in {r[1] for r in c.execute("PRAGMA table_info(worker_state)")}:
+            c.execute("ALTER TABLE worker_state ADD COLUMN profile_index INTEGER NOT NULL DEFAULT 0")
         cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
         for name in ("passwordhash", "updatedat"):
             if name not in cols:
@@ -181,12 +187,14 @@ class Login(BaseModel):
 class Register(Login):
     bottoken: str = Field(default="", max_length=200)
     checkinterval: int = Field(default=5, ge=5, le=1440)
+    debug_notifications: bool = True
 
 
 class Settings(BaseModel):
     bot_token: str | None = Field(default=None, max_length=200)
     chat_id: str = Field(min_length=1, max_length=80)
     check_interval: int = Field(default=5, ge=5, le=1440)
+    debug_notifications: bool = True
 
 
 class Selection(BaseModel):
@@ -300,10 +308,9 @@ def schedule_due(c, now):
     # One shared quote for all users and both lists. Polling the UI never schedules jobs.
     c.execute("""UPDATE quotes SET requested=1 WHERE requested=0 AND EXISTS (
         SELECT 1 FROM entries e JOIN users u ON u.id=e.user_id WHERE e.quote_key=quotes.key
-        AND e.needs_review=0 AND (e.tracked=1 OR e.quantity>0)
-        AND COALESCE(quotes.checked_at,0) + CASE WHEN e.tracked=1
-            THEN MAX(?, COALESCE(u.check_interval,15)*60) ELSE ? END <= ?)
-        """, (CACHE_SECONDS, COLLECTION_INTERVAL, now))
+        AND e.needs_review=0 AND e.tracked=1
+        AND COALESCE(quotes.checked_at,0) + MAX(?, COALESCE(u.check_interval,5)*60) <= ?)
+        """, (CACHE_SECONDS, now))
 
 
 def queue_price_notification(c, entry, cents, url):
@@ -333,7 +340,9 @@ def worker_step():
             return False
         c.execute("UPDATE worker_state SET lease_until=?,next_request=? WHERE id=1", (now+180, now+MIN_GAP))
     q = dict(quote)
+    profile = PROFILES[state["profile_index"] % len(PROFILES)]
     try:
+        reader.select_profile(state["profile_index"])
         result = reader.fetch(q["url"], q["language"], q["condition"], q["variant"])
     except Exception as exc:
         # Do not log request URLs with credentials or raw page contents.
@@ -352,6 +361,9 @@ def worker_step():
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         state = c.execute("SELECT * FROM worker_state WHERE id=1").fetchone()
+        c.execute("INSERT INTO price_attempts(quote_key,profile,status,http_status,created_at) VALUES (?,?,?,?,?)",
+                  (q["key"], profile, result["status"], result.get("http_status"), now))
+        c.execute("DELETE FROM price_attempts WHERE created_at<?", (now-30*86400,))
         if result["status"] == "ok":
             cents = result["price_cents"]
             c.execute("UPDATE quotes SET price_cents=?,checked_at=?,attempted_at=?,status='ok',message=?,requested=0,next_attempt=?,failures=0 WHERE key=?",
@@ -365,12 +377,28 @@ def worker_step():
                 delay = max(min(86400, BLOCK_COOLDOWN * 2**min(state["strikes"], 6)), backoff_seconds(result.get("retry_after"), now))
                 c.execute("UPDATE worker_state SET blocked_until=?,strikes=strikes+1 WHERE id=1", (now+delay,))
                 log.warning("Cardmarket paused for %d seconds (HTTP %s)", delay, result.get("http_status", "challenge"))
+                # A rate limit is independent of the browser. Only change profile
+                # after an access block, and never before the persisted cooldown.
+                if result.get("http_status") != 429:
+                    c.execute("UPDATE worker_state SET profile_index=(profile_index+1)%? WHERE id=1", (len(PROFILES),))
+            elif result["status"] == "auth_required":
+                delay = max(delay, BLOCK_COOLDOWN)
             c.execute("UPDATE quotes SET status=?,message=?,attempted_at=?,next_attempt=?,failures=failures+1 WHERE key=?",
                       (result["status"], result["message"], now, now+delay, q["key"]))
             # A detail viewed once must not retry forever after the user leaves it.
             c.execute("""UPDATE quotes SET requested=0 WHERE key=? AND NOT EXISTS
                 (SELECT 1 FROM entries WHERE quote_key=quotes.key AND (tracked=1 OR quantity>0))""", (q["key"],))
         c.execute("UPDATE worker_state SET lease_until=0,next_request=? WHERE id=1", (now+MIN_GAP,))
+        counts = c.execute("SELECT COUNT(*) attempts, SUM(status='blocked') blocks, SUM(status='auth_required') auth FROM price_attempts WHERE quote_key=?", (q["key"],)).fetchone()
+        next_profile = PROFILES[c.execute("SELECT profile_index FROM worker_state WHERE id=1").fetchone()[0] % len(PROFILES)]
+        for entry in c.execute("SELECT e.* FROM entries e JOIN users u ON u.id=e.user_id WHERE e.quote_key=? AND e.tracked=1 AND u.debug_notifications=1", (q["key"],)).fetchall():
+            message = (f"Test controllo · {entry['name']}\nProfilo: {profile}\n"
+                       f"Esito: {result['status']} · HTTP {result.get('http_status', '-')}\n"
+                       f"Controlli ultimi 30 giorni: {counts['attempts']} · Blocchi: {counts['blocks'] or 0} · HTTP 401: {counts['auth'] or 0}\n"
+                       f"{result['message']}\n")
+            if result['status'] != 'ok':
+                message += f"Prossimo tentativo non prima di {stamp(now+delay)} · Profilo: {next_profile}"
+            c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (entry['user_id'], entry['id'], message))
     return True
 
 
@@ -453,6 +481,7 @@ def register(data: Register):
         uid = "user_" + uuid.uuid4().hex[:16]
         c.execute("INSERT INTO users(id,bot_token,chat_id,check_interval,created_at,passwordhash) VALUES (?,?,?,?,?,?)",
                   (uid, data.bottoken.strip(), data.chatid.strip(), data.checkinterval, stamp(time.time()), hash_password(data.password.strip())))
+        c.execute("UPDATE users SET debug_notifications=? WHERE id=?", (int(data.debug_notifications), uid))
     return session_for(uid)
 
 
@@ -474,7 +503,8 @@ def logout(user=Depends(current_user), authorization: str = Header()):
 
 @app.get("/api/settings")
 def get_settings(user=Depends(current_user)):
-    return {"chat_id": user["chat_id"], "has_bot_token": bool(user["bot_token"]), "check_interval": user["check_interval"], "minimum_interval": CACHE_SECONDS//60}
+    return {"chat_id": user["chat_id"], "has_bot_token": bool(user["bot_token"]), "check_interval": user["check_interval"], "minimum_interval": CACHE_SECONDS//60,
+            "debug_notifications": bool(user["debug_notifications"])}
 
 
 @app.post("/api/telegram/test")
@@ -512,6 +542,7 @@ def put_settings(data: Settings, user=Depends(current_user)):
             raise HTTPException(409, "Questo Chat ID è già associato a un altro account.")
         c.execute("UPDATE users SET bot_token=?,chat_id=?,check_interval=?,updatedat=? WHERE id=?",
                   (data.bot_token.strip() if data.bot_token is not None else user["bot_token"], data.chat_id.strip(), data.check_interval, stamp(time.time()), user["id"]))
+        c.execute("UPDATE users SET debug_notifications=? WHERE id=?", (int(data.debug_notifications), user['id']))
     return {"status": "saved"}
 
 
@@ -593,6 +624,10 @@ def save_entry(data, user, entry_id=None):
             cur = c.execute("""INSERT INTO entries(quote_key,catalog_id,catalog_lang,option_id,name,set_name,number,image,url,
                 language,condition,variant,quantity,tracked,notified_cents,user_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (*fields, user["id"], time.time()))
             entry_id = cur.lastrowid
+        if data.tracked and user['debug_notifications'] and (not old or not old['tracked'] or old['quote_key'] != key):
+            c.execute("INSERT INTO outbox(user_id,entry_id,message) VALUES (?,?,?)", (user['id'], entry_id,
+                      f"Carta in controllo · {meta['name']}\n{LANGUAGES[data.language][1]} · {data.condition} · {variant}\n"
+                      "Riceverai il primo prezzo verificato, i cambi successivi e gli esiti diagnostici dei controlli."))
         if data.tracked and q["status"] == "ok" and q["checked_at"] and time.time()-q["checked_at"] < CACHE_SECONDS:
             entry = c.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
             queue_price_notification(c, entry, q["price_cents"], url)

@@ -58,6 +58,13 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(reader.fetch(URL, "it", "NM", "normal")["status"], "blocked")
             self.assertEqual(get.call_count, 1)
 
+    def test_authentication_refusal_does_not_retry_or_switch_profile(self):
+        reader = CardmarketReader()
+        with patch.object(reader.session, "get", return_value=Mock(status_code=401)) as get:
+            self.assertEqual(reader.fetch(URL, "it", "NM", "normal")["status"], "auth_required")
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(reader.profile, 'chrome120')
+
     def test_ambiguous_mapping_is_not_guessed(self):
         card = {"variants_detailed": [{"type": "normal", "thirdParty": {"cardmarket": 42}}, {"type": "holo", "thirdParty": {"cardmarket": 42}}]}
         self.assertEqual(card_options(card), [])
@@ -71,7 +78,7 @@ class IntegrationTests(unittest.TestCase):
         self.path_patch.start()
         self.client = TestClient(backend.app)
         self.client.__enter__()
-        r = self.client.post('/auth/register', json={"chatid": "test-user", "password": "Password123!", "bottoken": "test-token"})
+        r = self.client.post('/auth/register', json={"chatid": "test-user", "password": "Password123!", "bottoken": "test-token", "debug_notifications": False})
         self.assertEqual(r.status_code, 200)
         self.headers = {"Authorization": "Bearer "+r.json()["token"]}
         self.user_id = r.json()["userid"]
@@ -112,6 +119,40 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 2)
             self.assertIn("12.50 € → 10.00 €", c.execute("SELECT message FROM outbox ORDER BY id DESC").fetchone()[0])
         self.assertEqual(self.client.get('/api/entries', headers=self.headers).json()['total_value'], 20)
+
+    def test_debug_notifications_and_profile_after_persistent_cooldown(self):
+        with backend.db() as c:
+            c.execute('UPDATE users SET debug_notifications=1 WHERE id=?', (self.user_id,))
+        self.add()
+        with backend.db() as c:
+            self.assertIn('Carta in controllo', c.execute('SELECT message FROM outbox').fetchone()[0])
+        with patch.object(backend.reader, 'fetch', return_value={'status': 'blocked', 'http_status': 403, 'message': 'Accesso rifiutato'}) as fetch:
+            backend.worker_step()
+            self.assertFalse(backend.worker_step())
+            self.assertEqual(fetch.call_count, 1)
+        backend.init_db()
+        with backend.db() as c:
+            state = c.execute('SELECT * FROM worker_state').fetchone()
+            self.assertEqual(state['profile_index'], 1)
+            self.assertGreater(state['blocked_until'], time.time())
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM price_attempts').fetchone()[0], 1)
+            text = c.execute('SELECT message FROM outbox ORDER BY id DESC').fetchone()[0]
+            self.assertIn('chrome120', text)
+            self.assertIn('safari15_5', text)
+            self.assertIn('Blocchi: 1', text)
+        self.allow_next()
+        with patch.object(backend.reader, 'fetch', return_value={'status':'ok', 'price_cents':500, 'message':'verified'}):
+            backend.worker_step()
+        self.assertEqual(backend.reader.profile, 'safari15_5')
+
+    def test_rate_limit_and_authentication_do_not_rotate(self):
+        self.add()
+        for status, code in (('blocked', 429), ('auth_required', 401)):
+            self.allow_next()
+            with patch.object(backend.reader, 'fetch', return_value={'status':status, 'http_status':code, 'message':'refused'}):
+                backend.worker_step()
+            with backend.db() as c:
+                self.assertEqual(c.execute('SELECT profile_index FROM worker_state').fetchone()[0], 0)
 
     def test_initial_cached_price_and_delivery_then_change(self):
         entry_id = self.add(tracked=False)

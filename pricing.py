@@ -5,6 +5,9 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit, urljoin
 
 from bs4 import BeautifulSoup
 import requests
+from curl_cffi import requests as browser_requests
+
+PROFILES = ("chrome120", "safari15_5", "firefox133")
 
 LANGUAGES = {"en": (1, "English"), "fr": (2, "French"), "de": (3, "German"),
              "es": (4, "Spanish"), "it": (5, "Italian"), "ja": (7, "Japanese"),
@@ -98,17 +101,27 @@ def parse_offers(html: str, language: str, condition: str, variant: str) -> dict
 
 class CardmarketReader:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "PriceBotCardsPokemon/2.0", "Accept-Language": "en"})
+        self.profile = PROFILES[0]
+        self.session = browser_requests.Session(impersonate=self.profile)
+
+    def select_profile(self, index):
+        profile = PROFILES[index % len(PROFILES)]
+        if profile != self.profile:
+            self.session.close()
+            self.profile = profile
+            self.session = browser_requests.Session(impersonate=profile)
 
     def fetch(self, url, language, condition, variant):
         # No retries here: the persistent queue owns every retry and the global cooldown.
         for _ in range(4):
             response = self.session.get(url, timeout=(5, 20), allow_redirects=False)
+            if response.status_code == 401:
+                return {"status": "auth_required", "http_status": 401,
+                        "message": "Cardmarket richiede una sessione autorizzata (HTTP 401). Cambiare browser non risolve un'autenticazione mancante."}
             if response.status_code in (403, 429, 503):
                 return {"status": "blocked", "http_status": response.status_code,
                         "retry_after": response.headers.get("Retry-After"), "message": "Accesso temporaneamente limitato da Cardmarket."}
-            if response.is_redirect:
+            if response.status_code in (301, 302, 303, 307, 308):
                 url = urljoin(url, response.headers.get("Location", ""))
                 # Prevent redirects out of the trusted host and to login/challenge endpoints.
                 url = filtered_url(url, language, condition, variant)
@@ -116,5 +129,7 @@ class CardmarketReader:
             response.raise_for_status()
             if len(response.content) > 8_000_000:
                 return {"status": "unverified", "message": "Risposta troppo grande."}
-            return parse_offers(response.text, language, condition, variant)
+            result = parse_offers(response.text, language, condition, variant)
+            result["http_status"] = response.status_code
+            return result
         return {"status": "unverified", "message": "Troppi reindirizzamenti."}
