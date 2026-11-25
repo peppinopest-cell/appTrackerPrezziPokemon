@@ -1,4 +1,4 @@
-name: Cardmarket legacy transport diagnostic
+name: Cardmarket Camoufox diagnostic
 on:
   push:
     branches: [codex/cardmarket-browser-diagnostic]
@@ -7,11 +7,13 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-      - name: Install diagnostic browser
+      - name: Install diagnostic dependencies
         run: |
-          python -m pip install cloudscraper==1.2.71 requests beautifulsoup4
+          python -m pip install camoufox requests beautifulsoup4
+          python -m playwright install-deps firefox
+          python -m camoufox fetch
       - name: Read one public product page
-        run: PYTHONPATH=. python scripts/check_legacy_cardmarket.py
+        run: PYTHONPATH=. python scripts/check_camoufox_cardmarket.py
