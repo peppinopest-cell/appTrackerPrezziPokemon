@@ -26,12 +26,12 @@ def parse_page(html, url, http_status=200):
     result = {'http_status': http_status, 'title': title, 'price': None}
     body = soup.get_text(' ', strip=True).lower().rstrip('.')
     if body in ('please login to continue', 'please login and retry', 'please log in to continue'):
-        return {**result, 'status': 'auth_required'}
+        return {**result, 'status': 'access_denied', 'reason': 'login_message_without_offers'}
     if ('just a moment' in title.lower() or 'attention required' in title.lower()
             or soup.select_one('#challenge-form, #cf-challenge-running, .cf-turnstile')):
         return {**result, 'status': 'challenge_required'}
     if http_status != 200:
-        return {**result, 'status': 'auth_required' if http_status == 401 else 'http_error'}
+        return {**result, 'status': 'access_denied' if http_status in (401, 403) else 'http_error'}
     language = int(query['language'][0]) if 'language' in query else None
     minimum = int(query['minCondition'][0]) if 'minCondition' in query else 7
     if language is not None and language not in LANGUAGES:
