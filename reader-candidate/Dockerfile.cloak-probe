@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /probe
-RUN pip install --no-cache-dir cloakbrowser beautifulsoup4 && python -m playwright install-deps chromium && apt-get update && apt-get install -y --no-install-recommends xvfb xauth
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 xvfb xauth && pip install --no-cache-dir cloakbrowser beautifulsoup4 && python -m playwright install-deps chromium
 COPY cardmarket_reader.py /probe/
 COPY cloak_probe.py /probe/probe.py
 CMD ["xvfb-run", "-a", "python", "/probe/probe.py"]
