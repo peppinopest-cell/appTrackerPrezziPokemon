@@ -12,10 +12,12 @@ async def main():
     options = ChromiumOptions()
     options.binary_location = shutil.which('google-chrome')
     options.block_notifications = True
+    options.add_argument('--disable-blink-features=AutomationControlled')
     print('PYDOLL_VERSION=' + importlib.metadata.version('pydoll-python'), flush=True)
     async with Chrome(options=options) as browser:
         tab = await browser.start()
         await asyncio.wait_for(tab.go_to(URL), timeout=60)
+        await asyncio.sleep(8)
         for number in range(2):
             response = await asyncio.wait_for(tab.request.get(URL), timeout=45)
             result = parse_page(response.text, response.url, response.status_code)
