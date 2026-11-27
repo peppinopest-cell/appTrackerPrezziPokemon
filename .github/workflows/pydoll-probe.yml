@@ -1,0 +1,18 @@
+name: Pydoll anonymous Cardmarket probe
+on:
+  push:
+    branches: [codex/pydoll-video-probe]
+permissions:
+  contents: read
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pydoll-python beautifulsoup4
+      - name: Read actual offers using browser-context requests
+        run: xvfb-run -a python scripts/pydoll_probe.py
