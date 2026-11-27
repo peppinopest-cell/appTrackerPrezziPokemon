@@ -1,0 +1,22 @@
+name: Pure CDP video Cardmarket probe
+on:
+  push:
+    branches: [codex/pure-cdp-video-probe]
+permissions:
+  contents: read
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install seleniumbase beautifulsoup4
+      - name: Install virtual display and fonts
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb fonts-liberation fonts-noto-color-emoji fonts-dejavu-core
+      - name: Read actual offers with pure CDP
+        env:
+          PYTHONPATH: .
+        run: xvfb-run -a -s '-screen 0 1280x1024x24' python scripts/cdp_video_probe.py
