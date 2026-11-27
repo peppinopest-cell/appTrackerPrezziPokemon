@@ -2,6 +2,7 @@
 import importlib.metadata
 import json
 import time
+import shutil
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 from seleniumbase import sb_cdp
@@ -33,7 +34,9 @@ def inspect(sb, number):
 print('SELENIUMBASE_VERSION=' + importlib.metadata.version('seleniumbase'), flush=True)
 sb = None
 try:
-    sb = sb_cdp.Chrome(headless=False, locale='it')
+    sb = sb_cdp.Chrome(headless=False, locale='it',
+                       browser_executable_path=shutil.which('google-chrome'),
+                       sandbox=False)
     if inspect(sb, 1):
         print('CDP_STAGE=waiting_300_seconds', flush=True)
         time.sleep(300)
