@@ -1,0 +1,30 @@
+name: CloakBrowser isolated free memory probe
+on:
+  push:
+    branches: [codex/cloakbrowser-probe]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build isolated probe
+        run: |
+          mkdir /tmp/cloak-probe
+          cp cardmarket_reader.py reader-candidate/cloak_probe.py /tmp/cloak-probe/
+          cp reader-candidate/Dockerfile.cloak-probe /tmp/cloak-probe/Dockerfile
+          docker build -t cloak-probe:test /tmp/cloak-probe
+          docker volume create cloak-cache
+      - name: Download licensed binary without saving credentials in image
+        env:
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_PROBE_KEY }}
+        run: docker run --rm -e CLOAKBROWSER_LICENSE_KEY -v cloak-cache:/root/.cloakbrowser cloak-probe:test python -m cloakbrowser install
+      - name: Verify actual Cardmarket offer within 512 MiB
+        env:
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_PROBE_KEY }}
+        run: docker run --name cloak-reader --memory=512m --memory-swap=512m -e CLOAKBROWSER_LICENSE_KEY -v cloak-cache:/root/.cloakbrowser cloak-probe:test
+      - name: Record memory termination status
+        if: always()
+        run: docker inspect cloak-reader --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}' || true
