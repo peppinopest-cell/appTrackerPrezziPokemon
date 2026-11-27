@@ -1,0 +1,18 @@
+CloakBrowser reader
+
+Aggiungi carta calls POST /watch, which launches one isolated headless browser
+and parses actual Cardmarket article rows with the URL language/condition filters.
+The same reader serves scheduled checks. Guide/average prices are never substituted.
+First price and later changes use the existing Telegram notifications.
+
+Set CLOAKBROWSER_LICENSE_KEY as a secret environment variable on the backend.
+Do not add it to the repository, Dockerfile, Expo environment or frontend.
+FlareSolverr is removed from the active application and image.
+
+The browser child process is stopped after 70 seconds including launch and closing.
+Concurrent reads are refused to respect the one-session free key.
+A failed read returns HTTP 503 with the cause and does not insert a watch or price.
+The first browser download may cause the first attempt to time out; retry after it ends.
+
+No paid services or subscriptions are configured. Cardmarket access and the full
+backend/browser memory requirement on Render Free remain unverified.

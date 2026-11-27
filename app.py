@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 import schedule
@@ -12,7 +11,11 @@ import os
 import re
 
 import requests as std_requests
-from curl_cffi import requests as cffi_requests
+from cloakbrowser_reader import CloakBrowserReader, ReaderError
+import logging
+import asyncio
+
+solver_reader = CloakBrowserReader()
 
 app = FastAPI(title="🔴 Poké Price Bot API")
 app.add_middleware(
@@ -93,132 +96,12 @@ def send_telegram_message(user_id, testo):
 
 # --- SCRAPING CORE ---
 def scrape_card_data(url, max_retries=3):
-    identities = [
-        {
-            "name": "safari-main",
-            "impersonate": "safari15_5",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "max-age=0",
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15"
-            }
-        },
-        {
-            "name": "chrome-fallback",
-            "impersonate": "chrome120",
-            "headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "max-age=0",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-        }
-    ]
-
-    for attempt in range(max_retries):
+    if solver_reader:
         try:
-            identity = identities[0] if attempt == 0 else identities[min(attempt, len(identities) - 1)]
-            time.sleep(random.uniform(1.2, 3.2))
-
-            cache_buster = random.randint(1000000, 9999999)
-            separator = "&" if "?" in url else "?"
-            url_busted = f"{url}{separator}nocache={cache_buster}"
-
-            response = cffi_requests.get(
-                url_busted,
-                impersonate=identity["impersonate"],
-                headers=identity["headers"],
-                timeout=18
-            )
-
-            if response.status_code == 403:
-                time.sleep(random.uniform(4.0, 7.0))
-                continue
-
-            soup = BeautifulSoup(response.text, "html.parser")
-            html_text = response.text
-            
-            price = None
-            condition = "N/A"
-            language = "🌐"
-            image_url = ""
-
-            # 1. ESTRAZIONE IMMAGINE
-            img_match = re.search(r'<img[^>]+src="([^"]+)"[^>]*class="[^"]*is-front[^"]*"', html_text)
-            if img_match:
-                image_url = img_match.group(1)
-                if image_url.startswith("//"): image_url = "https:" + image_url
-            else:
-                img_meta = soup.find("meta", property="og:image")
-                if img_meta and img_meta.get("content"):
-                    image_url = img_meta["content"]
-
-            # 2. ESTRAZIONE TABELLA (PREZZO, LINGUA E CONDIZIONE)
-            first_row = soup.select_one("div.row.article-row")
-            if first_row:
-                # A. Prezzo
-                price_tag = first_row.select_one(".price-container .color-primary, .color-primary.small, span.fw-bold, .font-weight-bold.color-primary")
-                if price_tag:
-                    price = parse_prezzo(price_tag.get_text(strip=True))
-
-                # B. Condizione
-                cond_tag = first_row.select_one("a.article-condition span.badge")
-                if cond_tag:
-                    condition = cond_tag.get_text(strip=True)
-
-                # C. Lingua (Estratta dagli attributi icon o onmouseover)
-                lang_tag = first_row.select_one("span.icon[aria-label], span.icon[data-original-title], span.icon[onmouseover]")
-                if lang_tag:
-                    lang_text = lang_tag.get("aria-label") or lang_tag.get("data-original-title") or ""
-                    
-                    if not lang_text and lang_tag.get("onmouseover"):
-                        match = re.search(r"showMsgBox\(this,`([^`]+)`\)", lang_tag.get("onmouseover"))
-                        if match:
-                            lang_text = match.group(1)
-
-                    lang_map = {
-                        "Inglese": "🇬🇧",
-                        "Italiano": "🇮🇹",
-                        "Francese": "🇫🇷",
-                        "Tedesco": "🇩🇪",
-                        "Spagnolo": "🇪🇸",
-                        "Portoghese": "🇵🇹",
-                        "Giapponese": "🇯🇵",
-                        "Coreano": "🇰🇷",
-                        "Cinese": "🇨🇳"
-                    }
-                    for k, v in lang_map.items():
-                        if k.lower() in lang_text.lower():
-                            language = v
-                            break
-
-            # 3. FALLBACK PREZZO (Se la riga tabella non esiste ma siamo sulla pagina carta)
-            if price is None:
-                prezzo_tag = soup.select_one("span.color-primary.small.text-end.text-nowrap.fw-bold")
-                if not prezzo_tag:
-                    tabelle = soup.select("dd.col-6.col-xl-7")
-                    for tag in tabelle:
-                        if "€" in tag.get_text(" ", strip=True):
-                            prezzo_tag = tag
-                            break
-                if prezzo_tag:
-                    price = parse_prezzo(prezzo_tag.get_text(strip=True))
-
-            if price is not None:
-                return {"price": price, "image": image_url, "condition": condition, "language": language}
-
-        except Exception as e:
-            pass
-
-        time.sleep(random.uniform(4.5, 8.5))
-
-    return None
-
+            return solver_reader.read(url)
+        except (ReaderError, ValueError) as exc:
+            logging.warning('Lettura Cardmarket tramite CloakBrowser: %s', exc)
+            return None
 # --- ENDPOINTS ---
 @app.get("/ping/{user_id}")
 async def ping_user(user_id: str):
@@ -252,10 +135,12 @@ async def add_watch(item: WatchItem):
         raise HTTPException(status_code=400, detail="URL non valido. Assicurati che sia un link di Cardmarket.")
 
     active_users[item.user_id] = time.time()
-    data = scrape_card_data(final_url)
+    data = await asyncio.to_thread(scrape_card_data, final_url)
     nome = final_url.split('/')[-1].split('?')[0].replace('-', ' ')
 
     if not data or data["price"] is None:
+        if solver_reader:
+            raise HTTPException(status_code=503, detail=solver_reader.last_error or 'Prezzo non verificabile tramite CloakBrowser. Riprova tra cinque minuti.')
         raise HTTPException(status_code=400, detail="Impossibile estrarre il prezzo. Il sito potrebbe aver bloccato la richiesta. Riprova più tardi.")
 
     cur = conn.cursor()
@@ -347,10 +232,6 @@ def job_check_prices():
             
             if current_minute % interval != 0:
                 continue
-                
-            last_seen = active_users.get(user_id, 0)
-            if time.time() - last_seen > 120:
-                continue 
                 
             cur.execute("SELECT id, url, last_price FROM watchlist WHERE user_id=?", (user_id,))
             cards = cur.fetchall()
