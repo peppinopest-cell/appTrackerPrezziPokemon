@@ -24,7 +24,11 @@ jobs:
       - name: Verify actual Cardmarket offer within 512 MiB
         env:
           CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_PROBE_KEY }}
-        run: docker run --name cloak-reader --memory=512m --memory-swap=512m -e CLOAKBROWSER_LICENSE_KEY -v cloak-cache:/root/.cloakbrowser cloak-probe:test
+        run: timeout 130s docker run --name cloak-reader --memory=512m --memory-swap=512m -e CLOAKBROWSER_LICENSE_KEY -v cloak-cache:/root/.cloakbrowser cloak-probe:test
       - name: Record memory termination status
         if: always()
-        run: docker inspect cloak-reader --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}' || true
+        run: |
+          docker inspect cloak-reader --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}' || true
+          docker exec cloak-reader cat /sys/fs/cgroup/memory.events || true
+          docker exec cloak-reader cat /sys/fs/cgroup/memory.peak || true
+          docker stop --time 5 cloak-reader || true

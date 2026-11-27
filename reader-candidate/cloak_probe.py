@@ -1,6 +1,7 @@
 """Isolated anonymous CloakBrowser probe. Never logs keys or cookies."""
 import json
 import os
+import signal
 from pathlib import Path
 from cloakbrowser import launch
 from cardmarket_reader import parse_page
@@ -19,9 +20,14 @@ def main():
     if not os.getenv('CLOAKBROWSER_LICENSE_KEY'):
         print('CLOAK_RESULT=' + json.dumps({'status': 'license_required', 'price': None}))
         return 2
+    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('probe_deadline')))
+    signal.alarm(100)
+    print('CLOAK_STAGE=launch', flush=True)
     browser = launch(headless=False, humanize=True, human_preset='careful')
     try:
+        print('CLOAK_STAGE=browser_started', flush=True)
         page = browser.new_page()
+        print('CLOAK_STAGE=navigation', flush=True)
         response = page.goto(URL, wait_until='domcontentloaded', timeout=60000)
         page.wait_for_timeout(10000)
         result = parse_page(page.content(), page.url, response.status if response else 0)
@@ -32,6 +38,7 @@ def main():
             'memory_mib': memory()}), flush=True)
         return 0 if result.get('status') == 'ok' else 2
     finally:
+        print('CLOAK_STAGE=closing', flush=True)
         browser.close()
 
 if __name__ == '__main__':
