@@ -15,4 +15,6 @@ jobs:
           python-version: '3.11'
       - run: pip install pydoll-python beautifulsoup4
       - name: Read actual offers using browser-context requests
+        env:
+          PYTHONPATH: .
         run: xvfb-run -a python scripts/pydoll_probe.py
