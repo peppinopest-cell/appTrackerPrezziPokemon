@@ -1,14 +1,12 @@
-FROM ghcr.io/flaresolverr/flaresolverr:v3.5.2
-USER root
+FROM python:3.12-slim
 WORKDIR /bot
 COPY requirements.txt /bot/requirements.txt
-RUN python -m venv --system-site-packages /opt/bot-venv && /opt/bot-venv/bin/pip install --no-cache-dir -r /bot/requirements.txt
-RUN mkdir -p /data && chown flaresolverr:flaresolverr /data /bot
-COPY --chown=flaresolverr:flaresolverr app.py cardmarket_reader.py flaresolverr_reader.py server_start.py /bot/
-USER flaresolverr
-ENV FLARESOLVERR_URL=embedded \
-    PYTHONPATH=/bot:/app \
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 && pip install --no-cache-dir -r /bot/requirements.txt && python -m playwright install-deps chromium
+RUN useradd --create-home bot && mkdir -p /data && chown bot:bot /data /bot
+COPY --chown=bot:bot app.py cardmarket_reader.py cloakbrowser_reader.py cloakbrowser_worker.py server_start.py /bot/
+USER bot
+ENV PYTHONPATH=/bot \
     DB_PATH=/data/watchlist_v4.db \
     PYTHONUNBUFFERED=1
 EXPOSE 10000
-CMD ["/opt/bot-venv/bin/python", "/bot/server_start.py"]
+CMD ["python", "/bot/server_start.py"]

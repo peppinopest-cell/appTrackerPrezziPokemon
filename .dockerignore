@@ -3,5 +3,6 @@
 !requirements.txt
 !app.py
 !cardmarket_reader.py
-!flaresolverr_reader.py
+!cloakbrowser_reader.py
+!cloakbrowser_worker.py
 !server_start.py

@@ -1,9 +1,7 @@
 fastapi
 uvicorn
 pydantic
-cloudscraper
 beautifulsoup4
 requests
 schedule
-curl_cffi
-curl-cffi
+cloakbrowser==0.7.3

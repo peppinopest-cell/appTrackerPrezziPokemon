@@ -5,6 +5,7 @@ services:
       - "127.0.0.1:10000:10000"
     environment:
       PORT: "10000"
+      CLOAKBROWSER_LICENSE_KEY: "${CLOAKBROWSER_LICENSE_KEY}"
     volumes:
       - bot-data:/data
     shm_size: 256mb

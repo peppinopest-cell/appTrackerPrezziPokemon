@@ -3,13 +3,13 @@ import os
 import unittest
 from unittest.mock import patch
 from fastapi import HTTPException
-from flaresolverr_reader import ReaderError
+from cloakbrowser_reader import ReaderError
 
 class BotIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_price_changes_and_closed_app(self):
         spec = importlib.util.spec_from_file_location('bot_integration_test', 'app.py')
         module = importlib.util.module_from_spec(spec)
-        with patch.dict(os.environ, {'DB_PATH': ':memory:', 'FLARESOLVERR_URL': 'http://127.0.0.1:8191'}), patch('threading.Thread.start'):
+        with patch.dict(os.environ, {'DB_PATH': ':memory:'}), patch('threading.Thread.start'):
             spec.loader.exec_module(module)
         price = {'price': 22.0, 'image': '', 'condition': 'NM', 'language': 'Italiano'}
         with patch.object(module.solver_reader, 'read', return_value=price) as reader, patch.object(module, 'send_telegram_message') as telegram, patch.object(module.time, 'sleep'):
