@@ -1,5 +1,6 @@
 """Bounded, serialized CloakBrowser reads for the API and scheduled checks."""
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -46,6 +47,8 @@ class CloakBrowserReader:
                 raise ReaderError('CloakBrowser non ha risposto entro 70 secondi. Nessun prezzo salvato.')
             result = None
             for line in output.splitlines():
+                if line.startswith('CLOAK_DIAGNOSTIC='):
+                    logging.warning('CLOAK_DIAGNOSTIC=%s', line.split('=', 1)[1])
                 if line.startswith('CLOAK_RESULT='):
                     result = json.loads(line.split('=', 1)[1])
             if not result:
