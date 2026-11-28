@@ -1,0 +1,42 @@
+name: Thermoptic bot server verification
+on:
+  push:
+    branches: [codex/thermoptic-server-probe]
+permissions:
+  contents: read
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install bot reader dependencies
+        run: pip install requests beautifulsoup4
+      - name: Get Thermoptic
+        run: |
+          git clone https://github.com/mandatoryprogrammer/thermoptic.git /tmp/thermoptic
+          git -C /tmp/thermoptic checkout 3b1d5e1f38ad3aefa1eced29caee89681ad475fe
+          cp scripts/thermoptic-onstart.js /tmp/thermoptic/hooks/onstart.js
+          cp scripts/thermoptic-probe-compose.yml /tmp/thermoptic/compose.probe.yml
+      - name: Deploy isolated server stack
+        working-directory: /tmp/thermoptic
+        run: docker compose -f docker-compose.yml -f compose.probe.yml up -d --build
+      - name: Verify using actual bot reader
+        env:
+          PYTHONPATH: .
+          THERMOPTIC_PROXY_URL: http://127.0.0.1:1234
+          THERMOPTIC_CA_FILE: /tmp/thermoptic/ssl/rootCA.crt
+        run: python scripts/thermoptic_server_probe.py
+      - name: Read hook verdict and resource usage
+        if: always()
+        working-directory: /tmp/thermoptic
+        run: |
+          docker compose -f docker-compose.yml -f compose.probe.yml logs thermoptic | grep -E 'CARDMARKET_RESULT|Challenge detected|attempting to click|Waiting until|proxy server|Error' || true
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}}'
+      - name: Stop isolated stack
+        if: always()
+        working-directory: /tmp/thermoptic
+        run: docker compose -f docker-compose.yml -f compose.probe.yml down -v

@@ -1,0 +1,6 @@
+services:
+  thermoptic:
+    environment:
+      ON_START_HOOK_FILE_PATH: /work/hooks/onstart.js
+      DEBUG: "false"
+      TRACE: "false"
