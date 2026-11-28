@@ -2,6 +2,7 @@
 import json
 import socket
 import time
+import subprocess
 from datetime import datetime, timezone
 from thermoptic_reader import ThermopticReader
 from cloakbrowser_reader import ReaderError
@@ -10,8 +11,12 @@ URL='https://www.cardmarket.com/en/Pokemon/Products/Singles/30th-Celebration/Mew
 deadline=time.monotonic()+150
 while True:
     try:
-        with socket.create_connection(('127.0.0.1',1234),timeout=2):
+        logs=subprocess.check_output(['docker','compose','-f','docker-compose.yml','-f','compose.probe.yml','logs','thermoptic'],cwd='/tmp/thermoptic',text=True)
+        if 'HTTP Proxy server is now running' in logs:
             break
+        if time.monotonic()>deadline:
+            raise SystemExit('THERMOPTIC_SERVER_RESULT=proxy_not_ready')
+        time.sleep(2)
     except OSError:
         if time.monotonic()>deadline:
             raise SystemExit('THERMOPTIC_SERVER_RESULT=proxy_not_ready')
