@@ -1,0 +1,21 @@
+name: Nodriver original Cardmarket server probe
+on:
+  push:
+    branches: [codex/nodriver-original-probe]
+permissions:
+  contents: read
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install nodriver beautifulsoup4
+      - run: sudo apt-get update -qq && sudo apt-get install -y xvfb fonts-liberation fonts-noto-color-emoji fonts-dejavu-core
+      - name: Read offers with original Nodriver
+        env:
+          PYTHONPATH: .
+        run: xvfb-run -a -s '-screen 0 1280x1024x24' python scripts/nodriver_probe.py
